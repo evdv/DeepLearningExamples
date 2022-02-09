@@ -73,3 +73,9 @@ pip install numba==0.49.1
 export CUDA_VISIBLE_DEVICES=1
 python inference.py --cuda   --fastpitch pretrained_models/fastpitch/nvidia_fastpitch_210824.pt   --waveglow pretrained_models/waveglow/nvidia_waveglow256pyt_fp16.pt   --wn-channels 256   -i phrases/devset10.tsv   -o output/wavs_devset10
 ```
+
+
+```bash
+bash scripts/download_dataset.sh
+bash scripts/prepare_dataset.sh
+```
