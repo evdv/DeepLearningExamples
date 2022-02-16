@@ -422,7 +422,7 @@ def validate(model, criterion, valset, batch_size, collate_fn, distributed_run,
     log({
         'loss/validation-loss': val_meta['loss'].item(),
         'mel-loss/validation-mel-loss': val_meta['mel_loss'].item(),
-        'validation-frames/s': num_frames.item() / val_meta['took'],
+        'validation-frames per s': num_frames.item() / val_meta['took'],
         'validation-took': val_meta['took'],
     }, rank)
 
@@ -711,7 +711,7 @@ def main():
                     'mel-loss/mel_loss': iter_mel_loss,
                     'kl_loss': iter_kl_loss,
                     'kl_weight': kl_weight,
-                    'frames/s': iter_num_frames / iter_time,
+                    'frames per s': iter_num_frames / iter_time,
                     'took': iter_time,
                     'lrate': optimizer.param_groups[0]['lr'],
                 }, args.local_rank)
@@ -731,7 +731,7 @@ def main():
             'epoch': epoch,
             'loss/epoch_loss': epoch_loss,
             'mel-loss/epoch_mel_loss': epoch_mel_loss,
-            'epoch_frames/s': epoch_num_frames / epoch_time,
+            'epoch_frames per s': epoch_num_frames / epoch_time,
             'epoch_took': epoch_time,
         }, args.local_rank)
         bmark_stats.update(epoch_num_frames, epoch_loss, epoch_mel_loss,
