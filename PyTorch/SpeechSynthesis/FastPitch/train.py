@@ -330,7 +330,7 @@ def plot_mels(pred_tgt_lists):
     return fig
 
 
-def plot_batch_mels(batch_size, pred_tgt_lists, rank):
+def plot_batch_mels(pred_tgt_lists, rank):
     regulated_features = []
     # prediction: mel, pitch, energy
     # target: mel, pitch, energy
@@ -348,7 +348,12 @@ def plot_batch_mels(batch_size, pred_tgt_lists, rank):
                                    new_pitch.squeeze(axis=2),
                                    new_energy.squeeze(axis=2)])
 
-    for i in range(batch_size):
+    batch_sizes = [feature.size(dim=0)
+                   for pred_tgt in regulated_features
+                   for feature in pred_tgt]
+    assert len(set(batch_sizes)) == 1
+
+    for i in range(batch_sizes[0]):
         fig = plot_mels([
             [array[i] for array in regulated_features[0]],
             [array[i] for array in regulated_features[1]]
@@ -358,7 +363,7 @@ def plot_batch_mels(batch_size, pred_tgt_lists, rank):
         plt.close('all')
 
 
-def log_validation_batch(x, y_pred, batch_size, rank):
+def log_validation_batch(x, y_pred, rank):
     x_fields = ['text_padded', 'input_lengths', 'mel_padded',
                 'output_lengths', 'pitch_padded', 'energy_padded',
                 'speaker', 'attn_prior', 'audiopaths']
@@ -373,11 +378,8 @@ def log_validation_batch(x, y_pred, batch_size, rank):
 
     pred_specs_keys = ['mel_out', 'pitch_pred', 'energy_pred', 'attn_hard_dur']
     tgt_specs_keys = ['mel_padded', 'pitch_tgt', 'energy_tgt', 'attn_hard_dur']
-    plot_batch_mels(batch_size,
-                    [[validation_dict[key] for key in pred_specs_keys],
-                     [validation_dict[key] for key in tgt_specs_keys]],
-                    rank
-                    )
+    plot_batch_mels([[validation_dict[key] for key in pred_specs_keys],
+                     [validation_dict[key] for key in tgt_specs_keys]], rank)
 
 
 def validate(model, criterion, valset, batch_size, collate_fn, distributed_run,
@@ -399,7 +401,7 @@ def validate(model, criterion, valset, batch_size, collate_fn, distributed_run,
             x, y, num_frames = batch_to_gpu(batch)
             y_pred = model(x)
 
-            log_validation_batch(x, y_pred, batch_size, rank)
+            log_validation_batch(x, y_pred, rank)
 
             loss, meta = criterion(y_pred, y, is_training=False, meta_agg='sum')
 
