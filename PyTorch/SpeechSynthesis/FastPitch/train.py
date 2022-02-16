@@ -330,7 +330,7 @@ def plot_mels(pred_tgt_lists):
     return fig
 
 
-def plot_batch_mels(batch_size, pred_tgt_lists):
+def plot_batch_mels(batch_size, pred_tgt_lists, rank):
     regulated_features = []
     # prediction: mel, pitch, energy
     # target: mel, pitch, energy
@@ -353,12 +353,12 @@ def plot_batch_mels(batch_size, pred_tgt_lists):
             [array[i] for array in regulated_features[0]],
             [array[i] for array in regulated_features[1]]
         ])
-        wandb.log({'spectrogram': fig})
+        log({'spectrogram': fig}, rank)
         # empty pyplot
         plt.close('all')
 
 
-def log_validation_batch(x, y_pred, batch_size):
+def log_validation_batch(x, y_pred, batch_size, rank):
     x_fields = ['text_padded', 'input_lengths', 'mel_padded',
                 'output_lengths', 'pitch_padded', 'energy_padded',
                 'speaker', 'attn_prior', 'audiopaths']
@@ -369,18 +369,19 @@ def log_validation_batch(x, y_pred, batch_size):
 
     validation_dict = dict(zip(x_fields + y_pred_fields,
                                list(x) + list(y_pred)))
-    wandb.log(validation_dict)  # something in here returns a warning
+    log(validation_dict, rank)  # something in here returns a warning
 
     pred_specs_keys = ['mel_out', 'pitch_pred', 'energy_pred', 'attn_hard_dur']
     tgt_specs_keys = ['mel_padded', 'pitch_tgt', 'energy_tgt', 'attn_hard_dur']
     plot_batch_mels(batch_size,
                     [[validation_dict[key] for key in pred_specs_keys],
-                     [validation_dict[key] for key in tgt_specs_keys]]
+                     [validation_dict[key] for key in tgt_specs_keys]],
+                    rank
                     )
 
 
 def validate(model, criterion, valset, batch_size, collate_fn, distributed_run,
-             batch_to_gpu):
+             batch_to_gpu, rank):
     """Handles all the validation scoring and printing"""
     was_training = model.training
     model.eval()
@@ -398,7 +399,7 @@ def validate(model, criterion, valset, batch_size, collate_fn, distributed_run,
             x, y, num_frames = batch_to_gpu(batch)
             y_pred = model(x)
 
-            log_validation_batch(x, y_pred, batch_size)
+            log_validation_batch(x, y_pred, batch_size, rank)
 
             loss, meta = criterion(y_pred, y, is_training=False, meta_agg='sum')
 
@@ -416,12 +417,12 @@ def validate(model, criterion, valset, batch_size, collate_fn, distributed_run,
     val_meta['took'] = time.perf_counter() - tik
 
     # log overall statistics of the validate step
-    wandb.log({
+    log({
         'loss/validation-loss': val_meta['loss'].item(),
         'mel-loss/validation-mel-loss': val_meta['mel_loss'].item(),
         'validation-frames/s': num_frames.item() / val_meta['took'],
         'validation-took': val_meta['took'],
-    })
+    }, rank)
 
     if was_training:
         model.train()
@@ -464,19 +465,16 @@ def apply_multi_tensor_ema(decay, model_weights, ema_weights, overflow_buf):
         decay, 1-decay, -1)
 
 
+def log(dictionary, rank):
+    if rank == 0:
+        wandb.log(dictionary)
+
+
 def main():
     parser = argparse.ArgumentParser(description='PyTorch FastPitch Training',
                                      allow_abbrev=False)
     parser = parse_args(parser)
     args, _ = parser.parse_known_args()
-
-    wandb.init(project=args.project,
-               config=vars(args),
-               notes=args.experiment_desc,
-               dir=args.output,
-               magic=True
-               )
-    print(f'Weights and Biases run name: {wandb.run.name}')
 
     if args.p_arpabet > 0.0:
         cmudict.initialize(args.cmudict_path, keep_ambiguous=True)
@@ -508,13 +506,23 @@ def main():
 
     model_config = models.get_model_config('FastPitch', args)
     model = models.get_model('FastPitch', model_config, device)
-    wandb.watch(model, log='all')
     attention_kl_loss = AttentionBinarizationLoss()
+
+    if args.local_rank == 0:
+        wandb.init(project=args.project,
+                   config=vars(args),
+                   notes=args.experiment_desc,
+                   dir=args.output,
+                   magic=True
+                   )
+        print(f'Weights and Biases run name: {wandb.run.name}')
+        wandb.watch(model, log='all')
 
     # Store pitch mean/std as params to translate from Hz during inference
     model.pitch_mean[0] = args.pitch_mean
     model.pitch_std[0] = args.pitch_std
-    wandb.log({'pitch_mean': args.pitch_mean, 'pitch_std': args.pitch_std})
+    log({'pitch_mean': args.pitch_mean, 'pitch_std': args.pitch_std},
+        args.local_rank)
 
     kw = dict(lr=args.learning_rate, betas=(0.9, 0.98), eps=1e-9,
               weight_decay=args.weight_decay)
@@ -692,8 +700,7 @@ def main():
                 epoch_loss += iter_loss
                 epoch_num_frames += iter_num_frames
                 epoch_mel_loss += iter_mel_loss
-
-                wandb.log({
+                log({
                     'epoch': epoch,
                     'epoch_iter': epoch_iter,
                     'num_iters': num_iters,
@@ -705,7 +712,7 @@ def main():
                     'frames/s': iter_num_frames / iter_time,
                     'took': iter_time,
                     'lrate': optimizer.param_groups[0]['lr'],
-                })
+                }, args.local_rank)
 
                 accumulated_steps = 0
                 iter_loss = 0
@@ -718,34 +725,35 @@ def main():
         epoch_mel_loss /= epoch_iter
         epoch_time = time.perf_counter() - epoch_start_time
 
-        wandb.log({
+        log({
             'epoch': epoch,
             'loss/epoch_loss': epoch_loss,
             'mel-loss/epoch_mel_loss': epoch_mel_loss,
             'epoch_frames/s': epoch_num_frames / epoch_time,
             'epoch_took': epoch_time,
-        })
+        }, args.local_rank)
         bmark_stats.update(epoch_num_frames, epoch_loss, epoch_mel_loss,
                            epoch_time)
 
         validate(model, criterion, valset, args.batch_size, collate_fn,
-                 distributed_run, batch_to_gpu)
+                 distributed_run, batch_to_gpu, args.local_rank)
 
         if args.ema_decay > 0:
             validate(ema_model, criterion, valset, args.batch_size, collate_fn,
-                     distributed_run, batch_to_gpu)
+                     distributed_run, batch_to_gpu, args.local_rank)
 
         maybe_save_checkpoint(args, model, ema_model, optimizer, scaler, epoch,
                               total_iter, model_config)
 
     # Finished training
     if len(bmark_stats) > 0:
-        wandb.log(bmark_stats.get(args.benchmark_epochs_num))
+        log(bmark_stats.get(args.benchmark_epochs_num), args.local_rank)
 
     validate(model, criterion, valset, args.batch_size, collate_fn,
-             distributed_run, batch_to_gpu)
+             distributed_run, batch_to_gpu, args.local_rank)
 
-    wandb.finish()
+    if args.local_rank == 0:
+        wandb.finish()
 
 
 if __name__ == '__main__':
