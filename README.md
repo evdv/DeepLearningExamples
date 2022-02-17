@@ -101,7 +101,7 @@ FastPitch is a fully feedforward [Transformer](#glossary) model that predicts me
 from raw text (Figure 1). The entire process is parallel, which means that all input letters are processed simultaneously to produce a full mel-spectrogram in a single forward pass.
 
 <p align="center">
-  <img src="./img/fastpitch_model.png" alt="FastPitch model architecture" />
+  <img src="PyTorch/SpeechSynthesis/FastPitch/img/fastpitch_model.png" alt="FastPitch model architecture" />
 </p>
 <p align="center">
   <em>Figure 1. Architecture of FastPitch (<a href=”https://arxiv.org/abs/2006.06873”>source</a>). The model is composed of a bidirectional Transformer backbone (also known as a Transformer encoder), a pitch predictor, and a duration predictor. After passing through the first *N* Transformer blocks, encoding, the signal is augmented with pitch information and discretely upsampled. Then it goes through another set of *N* Transformer blocks, with the goal of
@@ -368,7 +368,7 @@ For every mel-spectrogram frame, its fundamental frequency in Hz is estimated wi
 the Probabilistic YIN algorithm.
 
 <p align="center">
-  <img src="./img/pitch.png" alt="Pitch contour estimate" />
+  <img src="PyTorch/SpeechSynthesis/FastPitch/img/pitch.png" alt="Pitch contour estimate" />
 </p>
 <p align="center">
   <em>Figure 2. Pitch estimates for mel-spectrogram frames of phrase "in being comparatively"
@@ -469,12 +469,12 @@ Pitch can be adjusted by transforming those pitch cues. A few simple examples ar
 
 | Transformation                              | Flag                          | Samples                                 |
 | :-------------------------------------------|:------------------------------|:---------------------------------------:|
-| -                                           | -                             | [link](./audio/sample_fp16.wav)         |
-| Amplify pitch wrt. to the mean pitch        |`--pitch-transform-amplify`    | [link](./audio/sample_fp16_amplify.wav) |
-| Invert pitch wrt. to the mean pitch         |`--pitch-transform-invert`     | [link](./audio/sample_fp16_invert.wav)  |
-| Raise/lower pitch by <hz>                   |`--pitch-transform-shift <hz>` | [link](./audio/sample_fp16_shift.wav)   |
-| Flatten the pitch to a constant value       |`--pitch-transform-flatten`    | [link](./audio/sample_fp16_flatten.wav) |
-| Change the rate of speech (1.0 = unchanged) |`--pace <value>`               | [link](./audio/sample_fp16_pace.wav)    |
+| -                                           | -                             | [link](PyTorch/SpeechSynthesis/FastPitch/audio/sample_fp16.wav)         |
+| Amplify pitch wrt. to the mean pitch        |`--pitch-transform-amplify`    | [link](PyTorch/SpeechSynthesis/FastPitch/audio/sample_fp16_amplify.wav) |
+| Invert pitch wrt. to the mean pitch         |`--pitch-transform-invert`     | [link](PyTorch/SpeechSynthesis/FastPitch/audio/sample_fp16_invert.wav)  |
+| Raise/lower pitch by <hz>                   |`--pitch-transform-shift <hz>` | [link](PyTorch/SpeechSynthesis/FastPitch/audio/sample_fp16_shift.wav)   |
+| Flatten the pitch to a constant value       |`--pitch-transform-flatten`    | [link](PyTorch/SpeechSynthesis/FastPitch/audio/sample_fp16_flatten.wav) |
+| Change the rate of speech (1.0 = unchanged) |`--pace <value>`               | [link](PyTorch/SpeechSynthesis/FastPitch/audio/sample_fp16_pace.wav)    |
 
 The flags can be combined. Modify these functions directly in the `inference.py` script to gain more control over the final result.
 
@@ -563,7 +563,7 @@ All of the results were produced using the `train.py` script as described in the
 
 
 <div style="text-align:center" align="center">
-  <img src="./img/loss.png" alt="Loss curves" />
+  <img src="PyTorch/SpeechSynthesis/FastPitch/img/loss.png" alt="Loss curves" />
 </div>
 
 #### Training performance results
