@@ -401,7 +401,8 @@ def validate(model, criterion, valset, batch_size, collate_fn, distributed_run,
             x, y, num_frames = batch_to_gpu(batch)
             y_pred = model(x)
 
-            log_validation_batch(x, y_pred, rank)
+            if i % 5 == 0:
+                log_validation_batch(x, y_pred, rank)
 
             loss, meta = criterion(y_pred, y, is_training=False, meta_agg='sum')
 
@@ -702,19 +703,20 @@ def main():
                 epoch_loss += iter_loss
                 epoch_num_frames += iter_num_frames
                 epoch_mel_loss += iter_mel_loss
-                log({
-                    'epoch': epoch,
-                    'epoch_iter': epoch_iter,
-                    'num_iters': num_iters,
-                    'total_steps': total_iter,
-                    'loss/loss': iter_loss,
-                    'mel-loss/mel_loss': iter_mel_loss,
-                    'kl_loss': iter_kl_loss,
-                    'kl_weight': kl_weight,
-                    'frames per s': iter_num_frames / iter_time,
-                    'took': iter_time,
-                    'lrate': optimizer.param_groups[0]['lr'],
-                }, args.local_rank)
+                if epoch_iter % 5 == 0:
+                    log({
+                        'epoch': epoch,
+                        'epoch_iter': epoch_iter,
+                        'num_iters': num_iters,
+                        'total_steps': total_iter,
+                        'loss/loss': iter_loss,
+                        'mel-loss/mel_loss': iter_mel_loss,
+                        'kl_loss': iter_kl_loss,
+                        'kl_weight': kl_weight,
+                        'frames per s': iter_num_frames / iter_time,
+                        'took': iter_time,
+                        'lrate': optimizer.param_groups[0]['lr'],
+                    }, args.local_rank)
 
                 accumulated_steps = 0
                 iter_loss = 0
