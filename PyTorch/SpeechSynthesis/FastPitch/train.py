@@ -30,6 +30,8 @@ import copy
 import glob
 import os
 import re
+import shlex
+import sys
 import time
 import warnings
 from collections import defaultdict
@@ -477,7 +479,10 @@ def main():
     parser = argparse.ArgumentParser(description='PyTorch FastPitch Training',
                                      allow_abbrev=False)
     parser = parse_args(parser)
-    args, _ = parser.parse_known_args()
+    # necessary to retain multi-word strings, e.g. for experiment description
+    # first item is 'train.py', which causes an exception later on (and is irrelevant)
+    fixed_args_list = shlex.split(' '.join(sys.argv))[1:]
+    args, _ = parser.parse_known_args(fixed_args_list)
 
     if args.p_arpabet > 0.0:
         cmudict.initialize(args.cmudict_path, keep_ambiguous=True)
@@ -496,7 +501,7 @@ def main():
         tb_subsets.append('val_ema')
 
     parser = models.parse_model_args('FastPitch', parser)
-    args, unk_args = parser.parse_known_args()
+    args, unk_args = parser.parse_known_args(fixed_args_list)
     if len(unk_args) > 0:
         raise ValueError(f'Invalid options {unk_args}')
 
