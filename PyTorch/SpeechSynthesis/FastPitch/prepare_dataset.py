@@ -26,6 +26,8 @@
 # *****************************************************************************
 
 import argparse
+import os
+import sys
 import time
 from pathlib import Path
 
@@ -44,14 +46,18 @@ def parse_args(parser):
     """
     parser.add_argument('-d', '--dataset-path', type=str,
                         default='./', help='Path to dataset')
+    parser.add_argument('--textgrid-path', type=str,
+                        help='Path to TextGrids')
     parser.add_argument('--wav-text-filelists', required=True, nargs='+',
                         type=str, help='Files with audio paths and text')
     parser.add_argument('--extract-mels', action='store_true',
                         help='Calculate spectrograms from .wav files')
     parser.add_argument('--extract-pitch', action='store_true',
                         help='Extract pitch')
-    parser.add_argument('--save-alignment-priors', action='store_true',
-                        help='Pre-calculate diagonal matrices of alignment of text to audio')
+    parser.add_argument('--extract-durations', action='store_true',
+                        help='Extract durations (from alignment dir)')
+    parser.add_argument('--durs-online-dir', type=str,
+                        help='Durations tmp dir')
     parser.add_argument('--log-file', type=str, default='preproc_log.json',
                          help='Filename for logging')
     parser.add_argument('--n-speakers', type=int, default=1)
@@ -85,6 +91,7 @@ def main():
     parser = parse_args(parser)
     args, unk_args = parser.parse_known_args()
     if len(unk_args) > 0:
+        print(unk_args)
         raise ValueError(f'Invalid options {unk_args}')
 
     DLLogger.init(backends=[JSONStreamBackend(Verbosity.DEFAULT, Path(args.dataset_path, args.log_file)),
@@ -99,34 +106,34 @@ def main():
     if args.extract_pitch:
         Path(args.dataset_path, 'pitch').mkdir(parents=False, exist_ok=True)
 
-    if args.save_alignment_priors:
-        Path(args.dataset_path, 'alignment_priors').mkdir(parents=False, exist_ok=True)
+    if args.extract_durations:
+        if not args.textgrid_path:
+            args.textgrid_path = os.path.join(args.dataset_path, 'TextGrid')
+        durs_path = Path(args.dataset_path, 'durations')
+        durs_path.mkdir(parents=False, exist_ok=True)
+        if args.durs_online_dir:
+            Path(args.durs_online_dir, durs_path).mkdir(parents=True, exist_ok=True)
 
     for filelist in args.wav_text_filelists:
 
         print(f'Processing {filelist}...')
 
-        dataset = TTSDataset(
-            args.dataset_path,
-            filelist,
-            text_cleaners=['english_cleaners_v2'],
-            n_mel_channels=args.n_mel_channels,
-            p_arpabet=0.0,
-            n_speakers=args.n_speakers,
-            load_mel_from_disk=False,
-            load_pitch_from_disk=False,
-            pitch_mean=None,
-            pitch_std=None,
-            max_wav_value=args.max_wav_value,
-            sampling_rate=args.sampling_rate,
-            filter_length=args.filter_length,
-            hop_length=args.hop_length,
-            win_length=args.win_length,
-            mel_fmin=args.mel_fmin,
-            mel_fmax=args.mel_fmax,
-            betabinomial_online_dir=None,
-            pitch_online_dir=None,
-            pitch_online_method=args.f0_method)
+        dataset = TTSDataset(args.dataset_path, filelist,
+                             text_cleaners=['english_cleaners_v2'],
+                             n_mel_channels=args.n_mel_channels, p_arpabet=1.0,
+                             n_speakers=args.n_speakers,
+                             load_mel_from_disk=False,
+                             load_pitch_from_disk=False, pitch_mean=None,
+                             pitch_std=None, max_wav_value=args.max_wav_value,
+                             sampling_rate=args.sampling_rate,
+                             filter_length=args.filter_length,
+                             hop_length=args.hop_length,
+                             win_length=args.win_length, mel_fmin=args.mel_fmin,
+                             mel_fmax=args.mel_fmax,
+                             pitch_online_dir=None,
+                             dur_online_dir=None,
+                             textgrid_path=args.textgrid_path,
+                             pitch_online_method=args.f0_method)
 
         data_loader = DataLoader(
             dataset,
@@ -142,8 +149,13 @@ def main():
         for i, batch in enumerate(tqdm.tqdm(data_loader)):
             tik = time.time()
 
-            _, input_lens, mels, mel_lens, _, pitch, _, _, attn_prior, fpaths = batch
-
+            # DATASET GETITEM
+            # (text, mel, len(text), pitch, energy, speaker, dur, audiopath, phones)
+            # TTSCOLLATE CALL
+            #  (text_padded, dur_padded, input_lengths, mel_padded,
+            #  output_lengths, len_x, pitch_padded, energy_padded, speaker,
+            #  audiopaths, phones_padded)
+            text, durs, input_lens, mels, mel_lens, _, pitch, _, _, _, fpaths, phones = batch
             # Ensure filenames are unique
             for p in fpaths:
                 fname = Path(p).name
@@ -163,11 +175,20 @@ def main():
                     fpath = Path(args.dataset_path, 'pitch', fname)
                     torch.save(p[:mel_lens[j]], fpath)
 
-            if args.save_alignment_priors:
-                for j, prior in enumerate(attn_prior):
-                    fname = Path(fpaths[j]).with_suffix('.pt').name
-                    fpath = Path(args.dataset_path, 'alignment_priors', fname)
-                    torch.save(prior[:mel_lens[j], :input_lens[j]], fpath)
+            if args.extract_durations:
+                # From Dan Wells
+                for j, d in enumerate(durs):
+                    filename = Path(fpaths[j]).stem
+                    # TODO remove hardcoding dataset path?
+                    dur_path = Path(args.dataset_path,
+                                    'durations', f'{filename}.pt')
+                    torch.save(d, dur_path)
+                for j, p in enumerate(phones):
+                    filename = Path(fpaths[j]).stem
+                    # save phones too
+                    phones_path = Path(args.dataset_path,
+                                       'durations', f'{filename}_phones.pt')
+                    torch.save(p, phones_path)
 
 
 if __name__ == '__main__':

@@ -9,6 +9,8 @@ from .cmudict import valid_symbols
 
 # Prepend "@" to ARPAbet symbols to ensure uniqueness (some are the same as uppercase letters):
 _arpabet = ['@' + s for s in valid_symbols]
+# In phones extracted from MFA TextGrid
+_silences = ['@sp', '@sil']
 
 
 def get_symbols(symbol_set='english_basic'):
@@ -17,20 +19,20 @@ def get_symbols(symbol_set='english_basic'):
         _punctuation = '!\'(),.:;? '
         _special = '-'
         _letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
-        symbols = list(_pad + _special + _punctuation + _letters) + _arpabet
+        symbols = list(_pad + _special + _punctuation + _letters) + _arpabet + _silences
     elif symbol_set == 'english_basic_lowercase':
         _pad = '_'
         _punctuation = '!\'"(),.:;? '
         _special = '-'
         _letters = 'abcdefghijklmnopqrstuvwxyz'
-        symbols = list(_pad + _special + _punctuation + _letters) + _arpabet
+        symbols = list(_pad + _special + _punctuation + _letters) + _arpabet + _silences
     elif symbol_set == 'english_expanded':
         _punctuation = '!\'",.:;? '
         _math = '#%&*+-/[]()'
         _special = '_@©°½—₩€$'
         _accented = 'áçéêëñöøćž'
         _letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
-        symbols = list(_punctuation + _math + _special + _accented + _letters) + _arpabet
+        symbols = list(_punctuation + _math + _special + _accented + _letters) + _arpabet + _silences
     else:
         raise Exception("{} symbol set does not exist".format(symbol_set))
 

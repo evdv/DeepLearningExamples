@@ -42,6 +42,7 @@ conda uninstall pytorch
 
 ## Then we reinstall and this for some reason downgrades the gcc to 7 and then installing apex works/
 conda install pytorch torchvision cudatoolkit=10.2 -c pytorch
+conda install -c conda-forge montreal-forced-aligner
 
 ## Apex
 cd /disk/scratch1/${USER}/FastPitches/PyTorch/SpeechSynthesis/FastPitch/
@@ -58,6 +59,7 @@ pip install wandb
 pip install llvmlite==0.35.0
 ## Ignore warning around here
 pip install numba==0.49.1
+pip install tgt
 
 ## for logging
 ## if needed, create a free account here: https://app.wandb.ai/login?signup=true

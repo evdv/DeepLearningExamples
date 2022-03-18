@@ -50,7 +50,6 @@ from torch.utils.data.distributed import DistributedSampler
 import models
 from common.text import cmudict
 from common.utils import BenchmarkStats, prepare_tmp
-from fastpitch.attn_loss_function import AttentionBinarizationLoss
 from fastpitch.data_function import batch_to_gpu, TTSCollate, TTSDataset
 from fastpitch.loss_function import FastPitchLoss
 from fastpitch.model import regulate_len
@@ -90,12 +89,6 @@ def parse_args(parser):
                        help='Discounting factor for training weights EMA')
     train.add_argument('--grad-accumulation', type=int, default=1,
                        help='Training steps to accumulate gradients for')
-    train.add_argument('--kl-loss-start-epoch', type=int, default=250,
-                       help='Start adding the hard attention loss term')
-    train.add_argument('--kl-loss-warmup-epochs', type=int, default=100,
-                       help='Gradually increase the hard attention loss term')
-    train.add_argument('--kl-loss-weight', type=float, default=1.0,
-                       help='Gradually increase the hard attention loss term')
     train.add_argument('--benchmark-epochs-num', type=int, default=20,
                         help='Number of epochs for calculating final stats')
 
@@ -129,7 +122,8 @@ def parse_args(parser):
                       help='Type of text cleaners for input text')
     data.add_argument('--symbol-set', type=str, default='english_basic',
                       help='Define symbol set for input text')
-    data.add_argument('--p-arpabet', type=float, default=0.0,
+    # should be 1.0 to work with MFA textgrids, which contain only phones
+    data.add_argument('--p-arpabet', type=float, default=1.0,
                       help='Probability of using arpabets instead of graphemes '
                            'for each word; set 0 for pure grapheme training')
     data.add_argument('--heteronyms-path', type=str, default='cmudict/heteronyms',
@@ -145,6 +139,8 @@ def parse_args(parser):
     cond.add_argument('--n-speakers', type=int, default=1,
                       help='Number of speakers in the dataset. '
                            'n_speakers > 1 enables speaker embeddings')
+    cond.add_argument('--load-durs-from-disk', action='store_true',
+                      help='Use durations cached on disk with prepare_dataset.py')
     cond.add_argument('--load-pitch-from-disk', action='store_true',
                       help='Use pitch cached on disk with prepare_dataset.py')
     cond.add_argument('--pitch-online-method', default='pyin',
@@ -152,6 +148,8 @@ def parse_args(parser):
                       help='Calculate pitch on the fly during trainig')
     cond.add_argument('--pitch-online-dir', type=str, default=None,
                       help='A directory for storing pitch calculated on-line')
+    cond.add_argument('--dur-online-dir', type=str, default=None,
+                      help='A directory for storing durations calculated on-line')
     cond.add_argument('--pitch-mean', type=float, default=214.72203,
                       help='Normalization value for pitch')
     cond.add_argument('--pitch-std', type=float, default=65.72038,
@@ -336,19 +334,21 @@ def plot_batch_mels(pred_tgt_lists, rank):
     regulated_features = []
     # prediction: mel, pitch, energy
     # target: mel, pitch, energy
-    for mel_pitch_energy in pred_tgt_lists:
+    for i, mel_pitch_energy in enumerate(pred_tgt_lists):
         mels = mel_pitch_energy[0]
         if mels.size(dim=2) == 80:  # tgt and pred mel have diff dimension order
             mels = mels.permute(0, 2, 1)
-        mel_lens = mel_pitch_energy[-1]
+        mel_lens = mel_pitch_energy[-1].squeeze()
+        pitch = mel_pitch_energy[1].squeeze().unsqueeze(dim=-1)
+        energy = mel_pitch_energy[2].squeeze().unsqueeze(dim=-1)
         # reverse regulation for plotting: for every mel frame get pitch+energy
-        new_pitch = regulate_len(mel_lens,
-                                 mel_pitch_energy[1].permute(0, 2, 1))[0]
-        new_energy = regulate_len(mel_lens,
-                                  mel_pitch_energy[2].unsqueeze(dim=-1))[0]
+        if i == 0:
+            energy = regulate_len(mel_lens, energy)[0]
+            pitch = regulate_len(mel_lens, pitch)[0]
+
         regulated_features.append([mels,
-                                   new_pitch.squeeze(axis=2),
-                                   new_energy.squeeze(axis=2)])
+                                   pitch.squeeze(axis=2),
+                                   energy.squeeze(axis=2)])
 
     batch_sizes = [feature.size(dim=0)
                    for pred_tgt in regulated_features
@@ -366,20 +366,20 @@ def plot_batch_mels(pred_tgt_lists, rank):
 
 
 def log_validation_batch(x, y_pred, rank):
+    # x = [text_padded, input_lengths, mel_padded, output_lengths,
+    #      pitch_padded, energy_padded, speaker, durs_padded, audiopaths, phones_padded]
+    # y_pred = mel_out, dec_lens, dur_pred, pitch_pred, energy_pred
     x_fields = ['text_padded', 'input_lengths', 'mel_padded',
                 'output_lengths', 'pitch_padded', 'energy_padded',
-                'speaker', 'attn_prior', 'audiopaths']
-    y_pred_fields = ['mel_out', 'dec_mask', 'dur_pred', 'log_dur_pred',
-                     'pitch_pred', 'pitch_tgt', 'energy_pred',
-                     'energy_tgt', 'attn_soft', 'attn_hard',
-                     'attn_hard_dur', 'attn_logprob']
+                'speaker', 'durs_padded', 'audiopaths', 'phones_padded']
+    y_pred_fields = ['mel_out', 'dec_mask', 'dur_pred', 'pitch_pred', 'energy_pred']
 
     validation_dict = dict(zip(x_fields + y_pred_fields,
                                list(x) + list(y_pred)))
     log(validation_dict, rank)  # something in here returns a warning
 
-    pred_specs_keys = ['mel_out', 'pitch_pred', 'energy_pred', 'attn_hard_dur']
-    tgt_specs_keys = ['mel_padded', 'pitch_tgt', 'energy_tgt', 'attn_hard_dur']
+    pred_specs_keys = ['mel_out', 'pitch_pred', 'energy_pred', 'durs_padded']
+    tgt_specs_keys = ['mel_padded', 'pitch_padded', 'energy_padded', 'durs_padded']
     plot_batch_mels([[validation_dict[key] for key in pred_specs_keys],
                      [validation_dict[key] for key in tgt_specs_keys]], rank)
 
@@ -400,7 +400,12 @@ def validate(model, criterion, valset, batch_size, collate_fn, distributed_run,
         val_meta = defaultdict(float)
         val_num_frames = 0
         for i, batch in enumerate(val_loader):
+            # x = [text_padded, input_lengths, mel_padded, output_lengths,
+            #      pitch_padded, energy_padded, speaker, durs_padded, audiopaths, phones_padded]
+            # y = [mel_padded, durs_padded, dur_lens, output_lengths]
+            # len_x = torch.sum(output_lengths)
             x, y, num_frames = batch_to_gpu(batch)
+            # y_pred = mel_out, dec_lens, dur_pred, pitch_pred, energy_pred
             y_pred = model(x)
 
             if i % 5 == 0:
@@ -425,6 +430,9 @@ def validate(model, criterion, valset, batch_size, collate_fn, distributed_run,
     log({
         'loss/validation-loss': val_meta['loss'].item(),
         'mel-loss/validation-mel-loss': val_meta['mel_loss'].item(),
+        'pitch-loss/validation-pitch-loss': val_meta['pitch_loss'].item(),
+        'energy-loss/validation-energy-loss': val_meta['energy_loss'].item(),
+        'dur-loss/validation-dur-error': val_meta['duration_predictor_loss'].item(),
         'validation-frames per s': num_frames.item() / val_meta['took'],
         'validation-took': val_meta['took'],
     }, rank)
@@ -514,7 +522,6 @@ def main():
 
     model_config = models.get_model_config('FastPitch', args)
     model = models.get_model('FastPitch', model_config, device)
-    attention_kl_loss = AttentionBinarizationLoss()
 
     if args.local_rank == 0:
         wandb.init(project=args.project,
@@ -574,8 +581,7 @@ def main():
 
     criterion = FastPitchLoss(
         dur_predictor_loss_scale=args.dur_predictor_loss_scale,
-        pitch_predictor_loss_scale=args.pitch_predictor_loss_scale,
-        attn_loss_scale=args.attn_loss_scale)
+        pitch_predictor_loss_scale=args.pitch_predictor_loss_scale)
 
     collate_fn = TTSCollate()
 
@@ -610,6 +616,9 @@ def main():
 
         epoch_loss = 0.0
         epoch_mel_loss = 0.0
+        epoch_pitch_loss = 0.0
+        epoch_energy_loss = 0.0
+        epoch_dur_loss = 0.0
         epoch_num_frames = 0
         epoch_frames_per_sec = 0.0
 
@@ -625,134 +634,132 @@ def main():
         epoch_iter = 0
         num_iters = len(train_loader) // args.grad_accumulation
         for batch in train_loader:
-
-            if accumulated_steps == 0:
-                if epoch_iter == num_iters:
-                    break
-                total_iter += 1
-                epoch_iter += 1
-
-                adjust_learning_rate(total_iter, optimizer, args.learning_rate,
-                                     args.warmup_steps)
-
-                model.zero_grad(set_to_none=True)
-
-            x, y, num_frames = batch_to_gpu(batch)
-
-            with torch.cuda.amp.autocast(enabled=args.amp):
-                y_pred = model(x)
-                loss, meta = criterion(y_pred, y)
-
-                if (args.kl_loss_start_epoch is not None
-                        and epoch >= args.kl_loss_start_epoch):
-
-                    if args.kl_loss_start_epoch == epoch and epoch_iter == 1:
-                        print('Begin hard_attn loss')
-
-                    _, _, _, _, _, _, _, _, attn_soft, attn_hard, _, _ = y_pred
-                    binarization_loss = attention_kl_loss(attn_hard, attn_soft)
-                    kl_weight = min((epoch - args.kl_loss_start_epoch) / args.kl_loss_warmup_epochs, 1.0) * args.kl_loss_weight
-                    meta['kl_loss'] = binarization_loss.clone().detach() * kl_weight
-                    loss += kl_weight * binarization_loss
-
-                else:
-                    meta['kl_loss'] = torch.zeros_like(loss)
-                    kl_weight = 0
-                    binarization_loss = 0
-
-                loss /= args.grad_accumulation
-
-            meta = {k: v / args.grad_accumulation
-                    for k, v in meta.items()}
-
-            if args.amp:
-                scaler.scale(loss).backward()
-            else:
-                loss.backward()
-
-            if distributed_run:
-                reduced_loss = reduce_tensor(loss.data, args.world_size).item()
-                reduced_num_frames = reduce_tensor(num_frames.data, 1).item()
-                meta = {k: reduce_tensor(v, args.world_size) for k, v in meta.items()}
-            else:
-                reduced_loss = loss.item()
-                reduced_num_frames = num_frames.item()
-            if np.isnan(reduced_loss):
-                raise Exception("loss is NaN")
-
-            accumulated_steps += 1
-            iter_loss += reduced_loss
-            iter_num_frames += reduced_num_frames
-            iter_meta = {k: iter_meta.get(k, 0) + meta.get(k, 0) for k in meta}
-
-            if accumulated_steps % args.grad_accumulation == 0:
-
-                if args.amp:
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(
-                        model.parameters(), args.grad_clip_thresh)
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    torch.nn.utils.clip_grad_norm_(
-                        model.parameters(), args.grad_clip_thresh)
-                    optimizer.step()
-
-                if args.ema_decay > 0.0:
-                    apply_multi_tensor_ema(args.ema_decay, *mt_ema_params)
-
-                iter_mel_loss = iter_meta['mel_loss'].item()
-                iter_kl_loss = iter_meta['kl_loss'].item()
-                iter_time = time.perf_counter() - iter_start_time
-                epoch_frames_per_sec += iter_num_frames / iter_time
-                epoch_loss += iter_loss
-                epoch_num_frames += iter_num_frames
-                epoch_mel_loss += iter_mel_loss
-                if epoch_iter % 5 == 0:
-                    log({
-                        'epoch': epoch,
-                        'epoch_iter': epoch_iter,
-                        'num_iters': num_iters,
-                        'total_steps': total_iter,
-                        'loss/loss': iter_loss,
-                        'mel-loss/mel_loss': iter_mel_loss,
-                        'kl_loss': iter_kl_loss,
-                        'kl_weight': kl_weight,
-                        'frames per s': iter_num_frames / iter_time,
-                        'took': iter_time,
-                        'lrate': optimizer.param_groups[0]['lr'],
-                    }, args.local_rank)
-
-                accumulated_steps = 0
-                iter_loss = 0
-                iter_num_frames = 0
-                iter_meta = {}
-                iter_start_time = time.perf_counter()
-
-        # Finished epoch
-        epoch_loss /= epoch_iter
-        epoch_mel_loss /= epoch_iter
-        epoch_time = time.perf_counter() - epoch_start_time
-
-        log({
-            'epoch': epoch,
-            'loss/epoch_loss': epoch_loss,
-            'mel-loss/epoch_mel_loss': epoch_mel_loss,
-            'epoch_frames per s': epoch_num_frames / epoch_time,
-            'epoch_took': epoch_time,
-        }, args.local_rank)
-        bmark_stats.update(epoch_num_frames, epoch_loss, epoch_mel_loss,
-                           epoch_time)
-
-        validate(model, criterion, valset, args.batch_size, collate_fn,
-                 distributed_run, batch_to_gpu, args.local_rank)
-
-        if args.ema_decay > 0:
-            validate(ema_model, criterion, valset, args.batch_size, collate_fn,
-                     distributed_run, batch_to_gpu, args.local_rank)
-
-        maybe_save_checkpoint(args, model, ema_model, optimizer, scaler, epoch,
-                              total_iter, model_config)
+            print(batch[-1])
+        #
+        #     if accumulated_steps == 0:
+        #         if epoch_iter == num_iters:
+        #             break
+        #         total_iter += 1
+        #         epoch_iter += 1
+        #
+        #         adjust_learning_rate(total_iter, optimizer, args.learning_rate,
+        #                              args.warmup_steps)
+        #
+        #         model.zero_grad(set_to_none=True)
+        #
+        #     x, y, num_frames = batch_to_gpu(batch)
+        #
+        #     with torch.cuda.amp.autocast(enabled=args.amp):
+        #         # (mel_out, dec_mask, dur_pred, log_dur_pred, pitch_pred, pitch_tgt, energy_pred, energy_tgt)
+        #         y_pred = model(x, use_gt_durations=True)
+        #         # y = mel_padded, input_lengths, output_lengths
+        #         loss, meta = criterion(y_pred, y)
+        #         loss /= args.grad_accumulation
+        #
+        #     meta = {k: v / args.grad_accumulation
+        #             for k, v in meta.items()}
+        #
+        #     if args.amp:
+        #         scaler.scale(loss).backward()
+        #     else:
+        #         loss.backward()
+        #
+        #     if distributed_run:
+        #         reduced_loss = reduce_tensor(loss.data, args.world_size).item()
+        #         reduced_num_frames = reduce_tensor(num_frames.data, 1).item()
+        #         meta = {k: reduce_tensor(v, args.world_size) for k, v in meta.items()}
+        #     else:
+        #         reduced_loss = loss.item()
+        #         reduced_num_frames = num_frames.item()
+        #     if np.isnan(reduced_loss):
+        #         raise Exception("loss is NaN")
+        #
+        #     accumulated_steps += 1
+        #     iter_loss += reduced_loss
+        #     iter_num_frames += reduced_num_frames
+        #     iter_meta = {k: iter_meta.get(k, 0) + meta.get(k, 0) for k in meta}
+        #
+        #     if accumulated_steps % args.grad_accumulation == 0:
+        #
+        #         if args.amp:
+        #             scaler.unscale_(optimizer)
+        #             torch.nn.utils.clip_grad_norm_(
+        #                 model.parameters(), args.grad_clip_thresh)
+        #             scaler.step(optimizer)
+        #             scaler.update()
+        #         else:
+        #             torch.nn.utils.clip_grad_norm_(
+        #                 model.parameters(), args.grad_clip_thresh)
+        #             optimizer.step()
+        #
+        #         if args.ema_decay > 0.0:
+        #             apply_multi_tensor_ema(args.ema_decay, *mt_ema_params)
+        #
+        #         iter_mel_loss = iter_meta['mel_loss'].item()
+        #         iter_pitch_loss = iter_meta['pitch_loss'].item()
+        #         iter_energy_loss = iter_meta['energy_loss'].item()
+        #         iter_dur_loss = iter_meta['duration_predictor_loss'].item()
+        #         iter_time = time.perf_counter() - iter_start_time
+        #         epoch_frames_per_sec += iter_num_frames / iter_time
+        #         epoch_loss += iter_loss
+        #         epoch_num_frames += iter_num_frames
+        #         epoch_mel_loss += iter_mel_loss
+        #         epoch_pitch_loss += iter_pitch_loss
+        #         epoch_energy_loss += iter_energy_loss
+        #         epoch_dur_loss += iter_dur_loss
+        #
+        #         if epoch_iter % 5 == 0:
+        #             log({
+        #                 'epoch': epoch,
+        #                 'epoch_iter': epoch_iter,
+        #                 'num_iters': num_iters,
+        #                 'total_steps': total_iter,
+        #                 'loss/loss': iter_loss,
+        #                 'mel-loss/mel_loss': iter_mel_loss,
+        #                 'pitch-loss/pitch_loss': iter_pitch_loss,
+        #                 'energy-loss/energy_loss': iter_energy_loss,
+        #                 'dur-loss/dur_loss': iter_dur_loss,
+        #                 'frames per s': iter_num_frames / iter_time,
+        #                 'took': iter_time,
+        #                 'lrate': optimizer.param_groups[0]['lr'],
+        #             }, args.local_rank)
+        #
+        #         accumulated_steps = 0
+        #         iter_loss = 0
+        #         iter_num_frames = 0
+        #         iter_meta = {}
+        #         iter_start_time = time.perf_counter()
+        #         # for debugging only
+        #         # validate(model, criterion, valset, args.batch_size, collate_fn,
+        #         #          distributed_run, batch_to_gpu, args.local_rank)
+        #
+        # # Finished epoch
+        # epoch_loss /= epoch_iter
+        # epoch_mel_loss /= epoch_iter
+        # epoch_time = time.perf_counter() - epoch_start_time
+        #
+        # log({
+        #     'epoch': epoch,
+        #     'loss/epoch_loss': epoch_loss,
+        #     'mel-loss/epoch_mel_loss': epoch_mel_loss,
+        #     'pitch-loss/epoch_pitch_loss': epoch_pitch_loss,
+        #     'energy-loss/epoch_energy_loss': epoch_energy_loss,
+        #     'dur-loss/epoch_dur_loss': epoch_dur_loss,
+        #     'epoch_frames per s': epoch_num_frames / epoch_time,
+        #     'epoch_took': epoch_time,
+        # }, args.local_rank)
+        # bmark_stats.update(epoch_num_frames, epoch_loss, epoch_mel_loss,
+        #                    epoch_time)
+        #
+        # validate(model, criterion, valset, args.batch_size, collate_fn,
+        #          distributed_run, batch_to_gpu, args.local_rank)
+        #
+        # if args.ema_decay > 0:
+        #     validate(ema_model, criterion, valset, args.batch_size, collate_fn,
+        #              distributed_run, batch_to_gpu, args.local_rank)
+        #
+        # maybe_save_checkpoint(args, model, ema_model, optimizer, scaler, epoch,
+        #                       total_iter, model_config)
 
     # Finished training
     if len(bmark_stats) > 0:

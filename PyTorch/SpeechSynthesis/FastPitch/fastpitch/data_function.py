@@ -25,57 +25,54 @@
 #
 # *****************************************************************************
 
-import functools
-import json
 import re
+from functools import lru_cache
 from pathlib import Path
 
 import librosa
 import numpy as np
 import torch
 import torch.nn.functional as F
-from scipy import ndimage
-from scipy.stats import betabinom
 
 import common.layers as layers
+from common.text import cmudict
 from common.text.text_processing import TextProcessing
 from common.utils import load_wav_to_torch, load_filepaths_and_text, to_gpu
+from tgt.io import read_textgrid
 
 
-class BetaBinomialInterpolator:
-    """Interpolates alignment prior matrices to save computation.
-
-    Calculating beta-binomial priors is costly. Instead cache popular sizes
-    and use img interpolation to get priors faster.
-    """
-    def __init__(self, round_mel_len_to=100, round_text_len_to=20):
-        self.round_mel_len_to = round_mel_len_to
-        self.round_text_len_to = round_text_len_to
-        self.bank = functools.lru_cache(beta_binomial_prior_distribution)
-
-    def round(self, val, to):
-        return max(1, int(np.round((val + 1) / to))) * to
-
-    def __call__(self, w, h):
-        bw = self.round(w, to=self.round_mel_len_to)
-        bh = self.round(h, to=self.round_text_len_to)
-        ret = ndimage.zoom(self.bank(bw, bh).T, zoom=(w / bw, h / bh), order=1)
-        assert ret.shape[0] == w, ret.shape
-        assert ret.shape[1] == h, ret.shape
-        return ret
+def check_durations(durs, mel_len, filepath):
+    assert sum(durs) == mel_len, \
+            f'Length mismatch: {filepath}, {sum(durs)} durs != {mel_len} lens'
 
 
-def beta_binomial_prior_distribution(phoneme_count, mel_count, scaling=1.0):
-    P = phoneme_count
-    M = mel_count
-    x = np.arange(0, P)
-    mel_text_probs = []
-    for i in range(1, M+1):
-        a, b = scaling * i, scaling * (M + 1 - i)
-        rv = betabinom(P, a, b)
-        mel_i_prob = rv.pmf(x)
-        mel_text_probs.append(mel_i_prob)
-    return torch.tensor(np.array(mel_text_probs))
+def parse_textgrid(tier, sampling_rate, hop_length):
+    # From Dan Wells
+    # Latest MFA replaces silence phones with "" in output TextGrids
+    sil_phones = ['sil', 'sp', 'spn', '']
+    start_time = tier[0].start_time
+    end_time = tier[-1].end_time
+    phones = []
+    durations = []
+    for index, label in enumerate(tier._objects):
+        p_start, p_end, phone = label.start_time, label.end_time, label.text
+        # if p_start > end_time:
+        #     phones.append('')
+        end_time = p_end
+        if phone not in sil_phones:
+            phones.append(phone)
+        else:
+            if (index == 0) or (index == len(tier) - 1):
+                # leading or trailing silence
+                phones.append('sil')
+            else:
+                # short pause between words
+                phones.append('sp')
+
+        durations.append(int(np.ceil(p_end * sampling_rate / hop_length)
+                             - np.ceil(p_start * sampling_rate / hop_length)))
+
+    return phones, durations, start_time, end_time
 
 
 def estimate_pitch(wav, mel_len, method='pyin', normalize_mean=None,
@@ -128,38 +125,26 @@ class TTSDataset(torch.utils.data.Dataset):
         2) normalizes text and converts them to sequences of one-hot vectors
         3) computes mel-spectrograms from audio files.
     """
-    def __init__(self,
-                 dataset_path,
-                 audiopaths_and_text,
-                 text_cleaners,
-                 n_mel_channels,
-                 symbol_set='english_basic',
-                 p_arpabet=1.0,
-                 n_speakers=1,
-                 load_mel_from_disk=True,
-                 load_pitch_from_disk=True,
-                 pitch_mean=214.72203,  # LJSpeech defaults
-                 pitch_std=65.72038,
-                 max_wav_value=None,
-                 sampling_rate=None,
-                 filter_length=None,
-                 hop_length=None,
-                 win_length=None,
-                 mel_fmin=None,
-                 mel_fmax=None,
-                 prepend_space_to_text=False,
-                 append_space_to_text=False,
-                 pitch_online_dir=None,
-                 betabinomial_online_dir=None,
-                 use_betabinomial_interpolator=True,
-                 pitch_online_method='pyin',
-                 **ignored):
+    def __init__(self, dataset_path, audiopaths_and_text, text_cleaners,
+                 n_mel_channels, symbol_set='english_basic', p_arpabet=1.0,
+                 cmu_dict='cmudict/cmudict-0.7b',
+                 n_speakers=1, load_mel_from_disk=True,
+                 load_pitch_from_disk=True, pitch_mean=214.72203,
+                 pitch_std=65.72038, energy_mean=51.796032, energy_std=9.861213,
+                 max_wav_value=None, sampling_rate=None,
+                 filter_length=None, hop_length=None, win_length=None,
+                 mel_fmin=None, mel_fmax=None, prepend_space_to_text=False,
+                 append_space_to_text=False, load_durs_from_disk=False,
+                 dur_online_dir=None, textgrid_path=None,
+                 pitch_online_dir=None, pitch_online_method='pyin', **ignored):
 
         # Expect a list of filenames
         if type(audiopaths_and_text) is str:
             audiopaths_and_text = [audiopaths_and_text]
 
+        self.hop_length = hop_length
         self.dataset_path = dataset_path
+        self.textgrid_path = textgrid_path
         self.audiopaths_and_text = load_filepaths_and_text(
             audiopaths_and_text, dataset_path,
             has_speakers=(n_speakers > 1))
@@ -171,6 +156,7 @@ class TTSDataset(torch.utils.data.Dataset):
                 filter_length, hop_length, win_length,
                 n_mel_channels, sampling_rate, mel_fmin, mel_fmax)
         self.load_pitch_from_disk = load_pitch_from_disk
+        self.load_durs_from_disk = load_durs_from_disk
 
         self.prepend_space_to_text = prepend_space_to_text
         self.append_space_to_text = append_space_to_text
@@ -178,19 +164,16 @@ class TTSDataset(torch.utils.data.Dataset):
         assert p_arpabet == 0.0 or p_arpabet == 1.0, (
             'Only 0.0 and 1.0 p_arpabet is currently supported. '
             'Variable probability breaks caching of betabinomial matrices.')
+        if p_arpabet > 0.0:
+            cmudict.initialize(cmu_dict, keep_ambiguous=True)
 
-        self.tp = TextProcessing(symbol_set, text_cleaners, p_arpabet=p_arpabet)
+        self.tp = TextProcessing(symbol_set, text_cleaners, p_arpabet=p_arpabet, handle_arpabet='word', handle_arpabet_ambiguous='random')
         self.n_speakers = n_speakers
         self.pitch_tmp_dir = pitch_online_dir
+        self.dur_tmp_dir = dur_online_dir
         self.f0_method = pitch_online_method
-        self.betabinomial_tmp_dir = betabinomial_online_dir
-        self.use_betabinomial_interpolator = use_betabinomial_interpolator
 
-        if use_betabinomial_interpolator:
-            self.betabinomial_interpolator = BetaBinomialInterpolator()
-
-        expected_columns = (2 + int(load_pitch_from_disk) + (n_speakers > 1))
-
+        expected_columns = (2 + int(load_durs_from_disk) + int(load_pitch_from_disk) + (n_speakers > 1))
         assert not (load_pitch_from_disk and self.pitch_tmp_dir is not None)
 
         if len(self.audiopaths_and_text[0]) < expected_columns:
@@ -203,6 +186,8 @@ class TTSDataset(torch.utils.data.Dataset):
         to_tensor = lambda x: torch.Tensor([x]) if type(x) is float else x
         self.pitch_mean = to_tensor(pitch_mean)
         self.pitch_std = to_tensor(pitch_std)
+        self.energy_mean = to_tensor(energy_mean)
+        self.energy_std = to_tensor(energy_std)
 
     def __getitem__(self, index):
         # Separate filename and text
@@ -214,23 +199,30 @@ class TTSDataset(torch.utils.data.Dataset):
             speaker = None
 
         mel = self.get_mel(audiopath)
-        text = self.get_text(text)
         pitch = self.get_pitch(index, mel.size(-1))
         energy = torch.norm(mel.float(), dim=0, p=2)
-        attn_prior = self.get_prior(index, mel.shape[1], text.shape[0])
+        if self.energy_mean is not None:
+            assert self.energy_std is not None
+            norm_energy = normalize_pitch(energy.unsqueeze(dim=0), self.energy_mean, self.energy_std)
+            energy = norm_energy.squeeze()
 
+        dur, phones = self.get_dur(index)
+        text = phones
         assert pitch.size(-1) == mel.size(-1)
 
         # No higher formants?
         if len(pitch.size()) == 1:
             pitch = pitch[None, :]
 
-        return (text, mel, len(text), pitch, energy, speaker, attn_prior,
-                audiopath)
+        # this is a batch
+        # FastPitch 1.0: (text, mel, len_text, dur, pitch, speaker)
+        return (text, mel, len(text), pitch, energy, speaker, dur,
+                audiopath, phones)
 
     def __len__(self):
         return len(self.audiopaths_and_text)
 
+    @lru_cache()
     def get_mel(self, filename):
         if not self.load_mel_from_disk:
             audio, sampling_rate = load_wav_to_torch(filename)
@@ -251,8 +243,9 @@ class TTSDataset(torch.utils.data.Dataset):
 
         return melspec
 
+    @lru_cache()
     def get_text(self, text):
-        text = self.tp.encode_text(text)
+        text, text_clean, text_arpabet = self.tp.encode_text(text, return_all=True)
         space = [self.tp.encode_text("A A")[1]]
 
         if self.prepend_space_to_text:
@@ -261,31 +254,49 @@ class TTSDataset(torch.utils.data.Dataset):
         if self.append_space_to_text:
             text = text + space
 
-        return torch.LongTensor(text)
+        return torch.LongTensor(text), text_arpabet
 
-    def get_prior(self, index, mel_len, text_len):
+    @lru_cache()
+    def get_dur(self, index):
+        audiopath, *fields = self.audiopaths_and_text[index]
+        name = Path(audiopath).stem
 
-        if self.use_betabinomial_interpolator:
-            return torch.from_numpy(self.betabinomial_interpolator(mel_len,
-                                                                   text_len))
+        # TODO: check what happens here with absolute vs relative paths
+        path = Path(self.dataset_path, 'durations') if self.dataset_path else Path(audiopath)
+        fname = Path(path, name).with_suffix('.pt')
 
-        if self.betabinomial_tmp_dir is not None:
-            audiopath, *_ = self.audiopaths_and_text[index]
-            fname = Path(audiopath).relative_to(self.dataset_path) if self.dataset_path else Path(audiopath)
-            fname = fname.with_suffix('.pt')
-            cached_fpath = Path(self.betabinomial_tmp_dir, fname)
+        if self.dur_tmp_dir is not None:
+            cached_durpath = Path(self.dur_tmp_dir, fname)
+            cached_phonepath = Path(self.dur_tmp_dir, name + '_phones').with_suffix('.pt')
+            if cached_durpath.is_file():
+                # assume if one exists the other does too
+                return torch.load(cached_durpath), torch.load(cached_phonepath)
 
-            if cached_fpath.is_file():
-                return torch.load(cached_fpath)
+        if self.load_durs_from_disk:
+            duration_path = fields[1]  # assume durations come after pitch
+            # assume phone_path is known from duration_path
+            phone_path = Path(Path(duration_path).parent, name + '_phones').with_suffix('.pt')
+            return torch.load(duration_path), torch.load(phone_path)
 
-        attn_prior = beta_binomial_prior_distribution(text_len, mel_len)
+        tgt_path = Path(self.textgrid_path, f'{name}.TextGrid')
+        try:
+            textgrid = read_textgrid(tgt_path, include_empty_intervals=True)
+        except FileNotFoundError:
+            print(f'{name}.wav TextGrid missing: {tgt_path}')
+            raise
+        phones, durs, _, _ = parse_textgrid(textgrid.get_tier_by_name('phones'),
+                                            self.sampling_rate,
+                                            self.hop_length)
+        phones = torch.Tensor(self.tp.arpabet_list_to_sequence(phones))
+        check_durations(durs, self.get_mel(audiopath).size(1), name)
+        durs = torch.Tensor(durs)
 
-        if self.betabinomial_tmp_dir is not None:
-            cached_fpath.parent.mkdir(parents=True, exist_ok=True)
-            torch.save(attn_prior, cached_fpath)
+        if self.dur_tmp_dir is not None and not cached_durpath.is_file() and not cached_phonepath.is_file():
+            return torch.save(durs, cached_durpath), torch.save(phones, cached_phonepath)
 
-        return attn_prior
+        return durs, phones
 
+    @lru_cache()
     def get_pitch(self, index, mel_len=None):
         audiopath, *fields = self.audiopaths_and_text[index]
 
@@ -327,13 +338,23 @@ class TTSDataset(torch.utils.data.Dataset):
 
 class TTSCollate:
     """Zero-pads model inputs and targets based on number of frames per step"""
-
+    # (text, mel, len(text), pitch, energy, speaker, dur, audiopath, phones) = batch
+    # 0: text
+    # 1: mel
+    # 2: len_text
+    # 3: pitch
+    # 4: energy
+    # 5: speaker
+    # 6: dur
+    # 7: audiopath
+    # 8: phones
     def __call__(self, batch):
         """Collate training batch from normalized text and mel-spec"""
         # Right zero-pad all one-hot text sequences to max input length
         input_lengths, ids_sorted_decreasing = torch.sort(
             torch.LongTensor([len(x[0]) for x in batch]),
             dim=0, descending=True)
+
         max_input_len = input_lengths[0]
 
         text_padded = torch.LongTensor(len(batch), max_input_len)
@@ -341,6 +362,19 @@ class TTSCollate:
         for i in range(len(ids_sorted_decreasing)):
             text = batch[ids_sorted_decreasing[i]][0]
             text_padded[i, :text.size(0)] = text
+
+        dur_padded = torch.zeros_like(text_padded, dtype=torch.int32)
+
+        dur_lens = torch.zeros(dur_padded.size(0), dtype=torch.int32)
+        for i in range(len(ids_sorted_decreasing)):
+            dur = batch[ids_sorted_decreasing[i]][6]
+            # With MFA durations:
+            # some mismatch between phones in transcript vs phones from text preprocessing
+            # for now using phones from texgrid as input
+            # PREP DATASET: DUR = LIST, TRAIN: DUR = TENSOR
+            dur_padded[i, :len(dur)] = dur
+            dur_lens[i] = len(dur)
+            assert dur_lens[i] == input_lengths[i]
 
         # Right zero-pad mel-spec
         num_mels = batch[0][1].size(0)
@@ -359,12 +393,14 @@ class TTSCollate:
         pitch_padded = torch.zeros(mel_padded.size(0), n_formants,
                                    mel_padded.size(2), dtype=batch[0][3].dtype)
         energy_padded = torch.zeros_like(pitch_padded[:, 0, :])
-
+        phones_padded = torch.zeros_like(text_padded, dtype=int)
         for i in range(len(ids_sorted_decreasing)):
             pitch = batch[ids_sorted_decreasing[i]][3]
             energy = batch[ids_sorted_decreasing[i]][4]
+            phones = batch[ids_sorted_decreasing[i]][8]
             pitch_padded[i, :, :pitch.shape[1]] = pitch
             energy_padded[i, :energy.shape[0]] = energy
+            phones_padded[i, :phones.shape[0]] = phones
 
         if batch[0][5] is not None:
             speaker = torch.zeros_like(input_lengths)
@@ -373,41 +409,35 @@ class TTSCollate:
         else:
             speaker = None
 
-        attn_prior_padded = torch.zeros(len(batch), max_target_len,
-                                        max_input_len)
-        attn_prior_padded.zero_()
-        for i in range(len(ids_sorted_decreasing)):
-            prior = batch[ids_sorted_decreasing[i]][6]
-            attn_prior_padded[i, :prior.size(0), :prior.size(1)] = prior
-
         # Count number of items - characters in text
         len_x = [x[2] for x in batch]
         len_x = torch.Tensor(len_x)
 
         audiopaths = [batch[i][7] for i in ids_sorted_decreasing]
 
-        return (text_padded, input_lengths, mel_padded, output_lengths, len_x,
-                pitch_padded, energy_padded, speaker, attn_prior_padded,
-                audiopaths)
+        return (text_padded, dur_padded, input_lengths, mel_padded, output_lengths, len_x,
+                pitch_padded, energy_padded, dur_lens, speaker, audiopaths, phones_padded)
 
 
 def batch_to_gpu(batch):
-    (text_padded, input_lengths, mel_padded, output_lengths, len_x,
-     pitch_padded, energy_padded, speaker, attn_prior, audiopaths) = batch
+    (text_padded, durs_padded, input_lengths, mel_padded, output_lengths, len_x,
+     pitch_padded, energy_padded, dur_lens, speaker, audiopaths, phones_padded) = batch
 
     text_padded = to_gpu(text_padded).long()
+    durs_padded = to_gpu(durs_padded).long()
+    dur_lens = to_gpu(dur_lens).long()
     input_lengths = to_gpu(input_lengths).long()
     mel_padded = to_gpu(mel_padded).float()
     output_lengths = to_gpu(output_lengths).long()
     pitch_padded = to_gpu(pitch_padded).float()
     energy_padded = to_gpu(energy_padded).float()
-    attn_prior = to_gpu(attn_prior).float()
+    phones_padded = to_gpu(phones_padded).long()
     if speaker is not None:
         speaker = to_gpu(speaker).long()
 
     # Alignments act as both inputs and targets - pass shallow copies
     x = [text_padded, input_lengths, mel_padded, output_lengths,
-         pitch_padded, energy_padded, speaker, attn_prior, audiopaths]
-    y = [mel_padded, input_lengths, output_lengths]
+         pitch_padded, energy_padded, speaker, durs_padded, audiopaths, phones_padded]
+    y = [mel_padded, durs_padded, dur_lens, output_lengths]
     len_x = torch.sum(output_lengths)
     return (x, y, len_x)

@@ -110,6 +110,7 @@ def parse_fastpitch_args(parent, add_help=False):
 
     energy_pred = parser.add_argument_group('energy predictor parameters')
     energy_pred.add_argument('--energy-conditioning', action='store_true')
+    energy_pred.add_argument('--norm_energy', action='store_true')
     energy_pred.add_argument('--energy-predictor-kernel-size', default=3, type=int,
                             help='Pitch predictor conv-1D kernel size')
     energy_pred.add_argument('--energy-predictor-filter-size', default=256, type=int,
