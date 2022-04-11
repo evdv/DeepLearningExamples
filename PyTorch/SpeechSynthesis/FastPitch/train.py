@@ -333,10 +333,12 @@ def plot_mels(pred_tgt_lists):
 
 
 def plot_batch_mels(pred_tgt_lists, rank):
+    print('inside logging batch mels')
     regulated_features = []
     # prediction: mel, pitch, energy
     # target: mel, pitch, energy
     for mel_pitch_energy in pred_tgt_lists:
+        print('inside mel pitch energy loop')
         mels = mel_pitch_energy[0]
         if mels.size(dim=2) == 80:  # tgt and pred mel have diff dimension order
             mels = mels.permute(0, 2, 1)
@@ -349,12 +351,12 @@ def plot_batch_mels(pred_tgt_lists, rank):
         regulated_features.append([mels,
                                    new_pitch.squeeze(axis=2),
                                    new_energy.squeeze(axis=2)])
-
+    print('get batch sizes')
     batch_sizes = [feature.size(dim=0)
                    for pred_tgt in regulated_features
                    for feature in pred_tgt]
     assert len(set(batch_sizes)) == 1
-
+    print('actually plottingthe mels')
     for i in range(batch_sizes[0]):
         fig = plot_mels([
             [array[i] for array in regulated_features[0]],
@@ -366,6 +368,7 @@ def plot_batch_mels(pred_tgt_lists, rank):
 
 
 def log_validation_batch(x, y_pred, rank):
+    print('logging validation batch')
     x_fields = ['text_padded', 'input_lengths', 'mel_padded',
                 'output_lengths', 'pitch_padded', 'energy_padded',
                 'speaker', 'attn_prior', 'audiopaths']
@@ -373,19 +376,23 @@ def log_validation_batch(x, y_pred, rank):
                      'pitch_pred', 'pitch_tgt', 'energy_pred',
                      'energy_tgt', 'attn_soft', 'attn_hard',
                      'attn_hard_dur', 'attn_logprob']
-
+    print('creating validation dict')
     validation_dict = dict(zip(x_fields + y_pred_fields,
                                list(x) + list(y_pred)))
+    print('logging here')
+    validation_dict.pop('dec_mask', None)
     log(validation_dict, rank)  # something in here returns a warning
 
     pred_specs_keys = ['mel_out', 'pitch_pred', 'energy_pred', 'attn_hard_dur']
     tgt_specs_keys = ['mel_padded', 'pitch_tgt', 'energy_tgt', 'attn_hard_dur']
+    print('plotting mel batches')
     plot_batch_mels([[validation_dict[key] for key in pred_specs_keys],
                      [validation_dict[key] for key in tgt_specs_keys]], rank)
 
 
 def validate(model, criterion, valset, batch_size, collate_fn, distributed_run,
              batch_to_gpu, rank):
+    print('inside validating')
     """Handles all the validation scoring and printing"""
     was_training = model.training
     model.eval()
@@ -397,16 +404,31 @@ def validate(model, criterion, valset, batch_size, collate_fn, distributed_run,
                                 sampler=val_sampler,
                                 batch_size=batch_size, pin_memory=False,
                                 collate_fn=collate_fn)
+        print('val loader set up')
         val_meta = defaultdict(float)
         val_num_frames = 0
         for i, batch in enumerate(val_loader):
+            print('val batch')
+            # x = (inputs, input_lens, mel_tgt, mel_lens, pitch_dense,
+            # energy_dense, spectral_tilt_dense, speaker, attn_prior, audiopaths)
+            print('batch to gpu')
             x, y, num_frames = batch_to_gpu(batch)
+            # (mel_out, dec_mask, dur_pred, log_dur_pred,
+            #  pitch_pred, pitch_tgt, energy_pred, energy_tgt,
+            #  spectral_tilt_pred, spectral_tilt_tgt,
+            #  attn_soft, attn_hard, attn_hard_dur, attn_logprob)
+            print('get model predictions')
             y_pred = model(x)
-
-            if i % 5 == 0:
-                log_validation_batch(x, y_pred, rank)
-
+            print('loss')
             loss, meta = criterion(y_pred, y, is_training=False, meta_agg='sum')
+            print('logging validation batch')
+            # this comes after criterion so we can remove dec_mask from y_pred,
+            # purely because it contains booleans, which need to be converted
+            # to be logged, which in turn throws a warning
+            if i % 5 == 0:
+                # dec_mask is index 1
+                # y_pred = y_pred[0:1] + y_pred[2:]
+                log_validation_batch(x, y_pred, rank)
 
             if distributed_run:
                 for k, v in meta.items():
@@ -420,7 +442,7 @@ def validate(model, criterion, valset, batch_size, collate_fn, distributed_run,
         val_meta = {k: v / len(valset) for k, v in val_meta.items()}
 
     val_meta['took'] = time.perf_counter() - tik
-
+    print('validate logging')
     # log overall statistics of the validate step
     log({
         'loss/validation-loss': val_meta['loss'].item(),
@@ -434,6 +456,7 @@ def validate(model, criterion, valset, batch_size, collate_fn, distributed_run,
 
     if was_training:
         model.train()
+    print('finished validating')
     return val_meta
 
 
@@ -474,6 +497,8 @@ def apply_multi_tensor_ema(decay, model_weights, ema_weights, overflow_buf):
 
 
 def log(dictionary, rank):
+    print(dictionary)
+    print(rank)
     if rank == 0:
         wandb.log(dictionary)
 
@@ -769,14 +794,14 @@ def main():
         if args.ema_decay > 0:
             validate(ema_model, criterion, valset, args.batch_size, collate_fn,
                      distributed_run, batch_to_gpu, args.local_rank)
-
+        print('maybe saving checkpoint')
         maybe_save_checkpoint(args, model, ema_model, optimizer, scaler, epoch,
                               total_iter, model_config)
 
     # Finished training
     if len(bmark_stats) > 0:
         log(bmark_stats.get(args.benchmark_epochs_num), args.local_rank)
-
+    print('end of training validate')
     validate(model, criterion, valset, args.batch_size, collate_fn,
              distributed_run, batch_to_gpu, args.local_rank)
 
