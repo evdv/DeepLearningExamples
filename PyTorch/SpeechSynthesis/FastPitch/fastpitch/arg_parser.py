@@ -119,11 +119,26 @@ def parse_fastpitch_args(parent, add_help=False):
     energy_pred.add_argument('--energy-predictor-n-layers', default=2, type=int,
                             help='Number of conv-1D layers')
 
+    spectral_pred = parser.add_argument_group('spectral tilt predictor parameters')
+    spectral_pred.add_argument('--spectral-tilt-conditioning', action='store_true')
+    spectral_pred.add_argument('--spectral-tilt-predictor-kernel-size', default=3, type=int,
+                               help='Pitch predictor conv-1D kernel size')
+    spectral_pred.add_argument('--spectral-tilt-predictor-filter-size', default=256, type=int,
+                               help='Pitch predictor conv-1D filter size')
+    spectral_pred.add_argument('--p-spectral-tilt-predictor-dropout', default=0.1, type=float,
+                               help='Pitch probability for energy predictor')
+    spectral_pred.add_argument('--spectral-tilt-predictor-n-layers', default=2, type=int,
+                               help='Number of conv-1D layers')
+    spectral_pred.add_argument('--no-spectral-predictors', default=6, type=int,
+                               help='6 if only one of surface or source, 12 if both')
+
     cond = parser.add_argument_group('conditioning parameters')
     cond.add_argument('--pitch-embedding-kernel-size', default=3, type=int,
                       help='Pitch embedding conv-1D kernel size')
     cond.add_argument('--energy-embedding-kernel-size', default=3, type=int,
-                      help='Pitch embedding conv-1D kernel size')
+                      help='Energy embedding conv-1D kernel size')
+    cond.add_argument('--spectral-tilt-embedding-kernel-size', default=3, type=int,
+                      help='Spectral tilt embedding conv-1D kernel size')
     cond.add_argument('--speaker-emb-weight', type=float, default=1.0,
                       help='Scale speaker embedding')
 

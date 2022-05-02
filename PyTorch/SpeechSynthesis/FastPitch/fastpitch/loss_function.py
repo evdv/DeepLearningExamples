@@ -36,18 +36,24 @@ from fastpitch.attn_loss_function import AttentionCTCLoss
 class FastPitchLoss(nn.Module):
     def __init__(self, dur_predictor_loss_scale=1.0,
                  pitch_predictor_loss_scale=1.0, attn_loss_scale=1.0,
-                 energy_predictor_loss_scale=0.1):
+                 energy_predictor_loss_scale=0.1,
+                 spectral_tilt_predictor_loss_scale=0.1):
         super(FastPitchLoss, self).__init__()
         self.dur_predictor_loss_scale = dur_predictor_loss_scale
         self.pitch_predictor_loss_scale = pitch_predictor_loss_scale
         self.energy_predictor_loss_scale = energy_predictor_loss_scale
+        self.spectral_tilt_predictor_loss_scale = spectral_tilt_predictor_loss_scale
         self.attn_loss_scale = attn_loss_scale
         self.attn_ctc_loss = AttentionCTCLoss()
 
     def forward(self, model_out, targets, is_training=True, meta_agg='mean'):
+        # (mel_out, dec_mask, dur_pred, log_dur_pred,
+        #  pitch_pred, pitch_tgt, energy_pred, energy_tgt,
+        #  spectral_tilt_pred, spectral_tilt_tgt,
+        #  attn_soft, attn_hard, attn_hard_dur, attn_logprob)
         (mel_out, dec_mask, dur_pred, log_dur_pred, pitch_pred, pitch_tgt,
-         energy_pred, energy_tgt, attn_soft, attn_hard, attn_dur,
-         attn_logprob) = model_out
+         energy_pred, energy_tgt, spectral_tilt_pred, spectral_tilt_tgt,
+         attn_soft, attn_hard, attn_dur, attn_logprob) = model_out
 
         (mel_tgt, in_lens, out_lens) = targets
 
@@ -81,7 +87,16 @@ class FastPitchLoss(nn.Module):
             energy_loss = F.mse_loss(energy_tgt, energy_pred, reduction='none')
             energy_loss = (energy_loss * dur_mask).sum() / dur_mask.sum()
         else:
-            energy_loss = 0
+            energy_loss = torch.tensor(0, dtype=torch.int8).to(device='cuda')
+
+        if spectral_tilt_pred is not None:
+            spectral_tilt_pred = spectral_tilt_pred.permute(0, 2, 1)
+            spectral_tilt_pred = F.pad(spectral_tilt_pred, (0, ldiff, 0, 0), value=0.0)
+            spectral_tilt_loss = F.mse_loss(spectral_tilt_tgt, spectral_tilt_pred, reduction='none')
+            spectral_dur_mask = torch.repeat_interleave(dur_mask[:, None, :], spectral_tilt_loss.size(1), dim=1) 
+            spectral_tilt_loss = (spectral_tilt_loss * spectral_dur_mask).sum() / spectral_dur_mask.sum()
+        else:
+            spectral_tilt_loss = torch.tensor(0, dtype=torch.int8).to(device='cuda')
 
         # Attention loss
         attn_loss = self.attn_ctc_loss(attn_logprob, in_lens, out_lens)
@@ -90,6 +105,7 @@ class FastPitchLoss(nn.Module):
                 + dur_pred_loss * self.dur_predictor_loss_scale
                 + pitch_loss * self.pitch_predictor_loss_scale
                 + energy_loss * self.energy_predictor_loss_scale
+                + spectral_tilt_loss * self.spectral_tilt_predictor_loss_scale
                 + attn_loss * self.attn_loss_scale)
 
         meta = {
@@ -97,13 +113,12 @@ class FastPitchLoss(nn.Module):
             'mel_loss': mel_loss.clone().detach(),
             'duration_predictor_loss': dur_pred_loss.clone().detach(),
             'pitch_loss': pitch_loss.clone().detach(),
+            'energy_loss': energy_loss.clone().detach(),
+            'spectral_tilt_loss': spectral_tilt_loss.clone().detach(),
             'attn_loss': attn_loss.clone().detach(),
             'dur_error': (torch.abs(dur_pred - dur_tgt).sum()
                           / dur_mask.sum()).detach(),
         }
-
-        if energy_pred is not None:
-            meta['energy_loss'] = energy_loss.clone().detach()
 
         assert meta_agg in ('sum', 'mean')
         if meta_agg == 'sum':

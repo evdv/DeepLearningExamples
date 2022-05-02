@@ -26,7 +26,6 @@
 # *****************************************************************************
 
 import functools
-import json
 import re
 from pathlib import Path
 
@@ -34,6 +33,7 @@ import librosa
 import numpy as np
 import torch
 import torch.nn.functional as F
+from matplotlib import pyplot as plt
 from scipy import ndimage
 from scipy.stats import betabinom
 
@@ -153,6 +153,7 @@ class TTSDataset(torch.utils.data.Dataset):
                  betabinomial_online_dir=None,
                  use_betabinomial_interpolator=True,
                  pitch_online_method='pyin',
+                 include_tilt=None,
                  **ignored):
 
         # Expect a list of filenames
@@ -204,6 +205,8 @@ class TTSDataset(torch.utils.data.Dataset):
         self.pitch_mean = to_tensor(pitch_mean)
         self.pitch_std = to_tensor(pitch_std)
 
+        self.spectral_tilt_features = include_tilt
+
     def __getitem__(self, index):
         # Separate filename and text
         if self.n_speakers > 1:
@@ -217,6 +220,10 @@ class TTSDataset(torch.utils.data.Dataset):
         text = self.get_text(text)
         pitch = self.get_pitch(index, mel.size(-1))
         energy = torch.norm(mel.float(), dim=0, p=2)
+        if self.spectral_tilt_features:
+                spectral_tilt = self.get_spectral_tilt(mel, audiopath, self.spectral_tilt_features)
+        else:
+                spectral_tilt = None
         attn_prior = self.get_prior(index, mel.shape[1], text.shape[0])
 
         assert pitch.size(-1) == mel.size(-1)
@@ -225,7 +232,7 @@ class TTSDataset(torch.utils.data.Dataset):
         if len(pitch.size()) == 1:
             pitch = pitch[None, :]
 
-        return (text, mel, len(text), pitch, energy, speaker, attn_prior,
+        return (text, mel, len(text), pitch, energy, spectral_tilt, speaker, attn_prior,
                 audiopath)
 
     def __len__(self):
@@ -324,6 +331,45 @@ class TTSDataset(torch.utils.data.Dataset):
 
         return pitch_mel
 
+    def get_spectral_tilt(self, mels, audio_path, tilt_features='both'):
+        # # plot these during development
+        # fig, axes = plt.subplots(2, 1, squeeze=False)
+        # titles = ["Mel Spectrogram", "One Slice"]
+        # axes[0][0].imshow(mels, origin="lower")
+        # axes[0][0].set_aspect(2.5, adjustable="box")
+        # axes[0][0].set_ylim(0, mels.shape[0])
+        # axes[0][0].set_title(titles[0], fontsize="medium")
+        # axes[0][0].tick_params(labelsize="x-small", left=False,
+        #                        labelleft=False)
+        # axes[0][0].set_anchor("W")
+        # one_slice = mels[:, 200]
+        # axes[1][0].plot(one_slice)
+        # axes[1][0].set_ylim(min(one_slice) - 0.5, max(one_slice) + 0.5)
+        # axes[1][0].set_title(titles[0], fontsize="medium")
+        # axes[1][0].tick_params(labelsize="x-small", left=False,
+        #                        labelleft=False)
+        # axes[1][0].set_anchor("W")
+        #
+        # plt.show()
+        n_mels = mels.size(0)
+
+        # surface tilt
+        # shape 6 x input_frames
+        poly_coefficients = np.polynomial.polynomial.polyfit(np.arange(1, n_mels + 1), mels, 5)
+        if tilt_features == 'both' or tilt_features == 'source':
+            # TODO: remove hardcoded path
+            audio_path = re.sub('/wavs/', '/iaif_gci_wavs/', audio_path)
+            iaif_mels = self.get_mel(audio_path)
+            iaif_poly_coefficients = np.polynomial.polynomial.polyfit(
+                np.arange(1, n_mels + 1), iaif_mels, 5)
+            if tilt_features == 'source':
+                return torch.FloatTensor(iaif_poly_coefficients)
+            # shape 12 x input_frames
+            return torch.cat([torch.FloatTensor(poly_coefficients),
+                              torch.FloatTensor(iaif_poly_coefficients)])
+        else:
+            return torch.FloatTensor(poly_coefficients)
+
 
 class TTSCollate:
     """Zero-pads model inputs and targets based on number of frames per step"""
@@ -355,7 +401,7 @@ class TTSCollate:
             mel_padded[i, :, :mel.size(1)] = mel
             output_lengths[i] = mel.size(1)
 
-        n_formants = batch[0][3].shape[0]
+        n_formants = batch[0][3].shape[0]  # default 1
         pitch_padded = torch.zeros(mel_padded.size(0), n_formants,
                                    mel_padded.size(2), dtype=batch[0][3].dtype)
         energy_padded = torch.zeros_like(pitch_padded[:, 0, :])
@@ -363,13 +409,22 @@ class TTSCollate:
         for i in range(len(ids_sorted_decreasing)):
             pitch = batch[ids_sorted_decreasing[i]][3]
             energy = batch[ids_sorted_decreasing[i]][4]
+            spectral_tilt = batch[ids_sorted_decreasing[i]][5]
             pitch_padded[i, :, :pitch.shape[1]] = pitch
             energy_padded[i, :energy.shape[0]] = energy
 
-        if batch[0][5] is not None:
+        if batch[0][5] is not None:  # if None, there is no spectral tilt
+            num_coefficients = batch[0][5].size(0)
+            spectral_tilt_padded = torch.FloatTensor(len(batch), num_coefficients, max_target_len).zero_()
+            for i in range(len(ids_sorted_decreasing)):
+                spectral_tilt_padded[i, :, :spectral_tilt.shape[1]] = spectral_tilt
+        else:
+            spectral_tilt_padded = None
+
+        if batch[0][6] is not None:
             speaker = torch.zeros_like(input_lengths)
             for i in range(len(ids_sorted_decreasing)):
-                speaker[i] = batch[ids_sorted_decreasing[i]][5]
+                speaker[i] = batch[ids_sorted_decreasing[i]][6]
         else:
             speaker = None
 
@@ -377,23 +432,23 @@ class TTSCollate:
                                         max_input_len)
         attn_prior_padded.zero_()
         for i in range(len(ids_sorted_decreasing)):
-            prior = batch[ids_sorted_decreasing[i]][6]
+            prior = batch[ids_sorted_decreasing[i]][7]
             attn_prior_padded[i, :prior.size(0), :prior.size(1)] = prior
 
         # Count number of items - characters in text
         len_x = [x[2] for x in batch]
         len_x = torch.Tensor(len_x)
 
-        audiopaths = [batch[i][7] for i in ids_sorted_decreasing]
+        audiopaths = [batch[i][8] for i in ids_sorted_decreasing]
 
         return (text_padded, input_lengths, mel_padded, output_lengths, len_x,
-                pitch_padded, energy_padded, speaker, attn_prior_padded,
+                pitch_padded, energy_padded, spectral_tilt_padded, speaker, attn_prior_padded,
                 audiopaths)
 
 
 def batch_to_gpu(batch):
     (text_padded, input_lengths, mel_padded, output_lengths, len_x,
-     pitch_padded, energy_padded, speaker, attn_prior, audiopaths) = batch
+     pitch_padded, energy_padded, spectral_tilt_padded, speaker, attn_prior, audiopaths) = batch
 
     text_padded = to_gpu(text_padded).long()
     input_lengths = to_gpu(input_lengths).long()
@@ -402,12 +457,14 @@ def batch_to_gpu(batch):
     pitch_padded = to_gpu(pitch_padded).float()
     energy_padded = to_gpu(energy_padded).float()
     attn_prior = to_gpu(attn_prior).float()
+    if spectral_tilt_padded is not None:
+        spectral_tilt_padded = to_gpu(spectral_tilt_padded).float()
     if speaker is not None:
         speaker = to_gpu(speaker).long()
 
     # Alignments act as both inputs and targets - pass shallow copies
     x = [text_padded, input_lengths, mel_padded, output_lengths,
-         pitch_padded, energy_padded, speaker, attn_prior, audiopaths]
+         pitch_padded, energy_padded, spectral_tilt_padded, speaker, attn_prior, audiopaths]
     y = [mel_padded, input_lengths, output_lengths]
     len_x = torch.sum(output_lengths)
     return (x, y, len_x)

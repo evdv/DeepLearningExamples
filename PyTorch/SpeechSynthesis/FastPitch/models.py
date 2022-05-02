@@ -144,6 +144,15 @@ def get_model_config(model_name, args):
             # energy conditioning
             energy_conditioning=args.energy_conditioning,
             energy_embedding_kernel_size=args.energy_embedding_kernel_size,
+            # spectral tilt predictor
+            spectral_tilt_predictor_kernel_size=args.spectral_tilt_predictor_kernel_size,
+            spectral_tilt_predictor_filter_size=args.spectral_tilt_predictor_filter_size,
+            p_spectral_tilt_predictor_dropout=args.p_spectral_tilt_predictor_dropout,
+            spectral_tilt_predictor_n_layers=args.spectral_tilt_predictor_n_layers,
+            # spectral tilt conditioning
+            spectral_tilt_conditioning=args.spectral_tilt_conditioning,
+            spectral_tilt_embedding_kernel_size=args.spectral_tilt_embedding_kernel_size,
+            no_spectral_predictors=args.no_spectral_predictors
         )
         return model_config
 

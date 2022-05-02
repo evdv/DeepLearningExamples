@@ -126,7 +126,12 @@ class FastPitch(nn.Module):
                  energy_predictor_kernel_size, energy_predictor_filter_size,
                  p_energy_predictor_dropout, energy_predictor_n_layers,
                  energy_embedding_kernel_size,
-                 n_speakers, speaker_emb_weight, pitch_conditioning_formants=1):
+                 n_speakers, speaker_emb_weight, spectral_tilt_conditioning,
+                 spectral_tilt_predictor_kernel_size, spectral_tilt_predictor_filter_size,
+                 p_spectral_tilt_predictor_dropout, spectral_tilt_predictor_n_layers,
+                 spectral_tilt_embedding_kernel_size,
+                 pitch_conditioning_formants=1,
+                 no_spectral_predictors=6):
         super(FastPitch, self).__init__()
 
         self.encoder = FFTransformer(
@@ -202,6 +207,22 @@ class FastPitch(nn.Module):
                 kernel_size=energy_embedding_kernel_size,
                 padding=int((energy_embedding_kernel_size - 1) / 2))
 
+        self.spectral_tilt_conditioning = spectral_tilt_conditioning
+        if spectral_tilt_conditioning:
+            self.spectral_tilt_predictor = TemporalPredictor(
+                in_fft_output_size,
+                filter_size=spectral_tilt_predictor_filter_size,
+                kernel_size=spectral_tilt_predictor_kernel_size,
+                dropout=p_spectral_tilt_predictor_dropout,
+                n_layers=spectral_tilt_predictor_n_layers,
+                n_predictions=no_spectral_predictors
+            )
+
+            self.spectral_tilt_emb = nn.Conv1d(
+                no_spectral_predictors, symbols_embedding_dim,
+                kernel_size=spectral_tilt_embedding_kernel_size,
+                padding=int((spectral_tilt_embedding_kernel_size - 1) / 2))
+
         self.proj = nn.Linear(out_fft_output_size, n_mel_channels, bias=True)
 
         self.attention = ConvAttention(
@@ -242,7 +263,7 @@ class FastPitch(nn.Module):
     def forward(self, inputs, use_gt_pitch=True, pace=1.0, max_duration=75):
 
         (inputs, input_lens, mel_tgt, mel_lens, pitch_dense, energy_dense,
-         speaker, attn_prior, audiopaths) = inputs
+         spectral_tilt_dense, speaker, attn_prior, audiopaths) = inputs
 
         mel_max_len = mel_tgt.size(2)
 
@@ -307,19 +328,36 @@ class FastPitch(nn.Module):
             energy_pred = None
             energy_tgt = None
 
+        # Predict spectral tilt
+        if self.spectral_tilt_conditioning:
+            spectral_tilt_pred = self.spectral_tilt_predictor(enc_out, enc_mask).squeeze(-1)
+
+            # Average energy over characters
+            spectral_tilt_tgt = average_pitch(spectral_tilt_dense, dur_tgt)
+            eps = 1e-7
+            spectral_tilt_tgt = F.relu(spectral_tilt_tgt)
+            spectral_tilt_tgt = torch.log(eps + spectral_tilt_tgt)
+            spectral_tilt_emb = self.spectral_tilt_emb(spectral_tilt_tgt)
+            spectral_tilt_tgt = spectral_tilt_tgt.squeeze(1)
+            enc_out = enc_out + spectral_tilt_emb.transpose(1, 2)
+        else:
+            spectral_tilt_pred = None
+            spectral_tilt_tgt = None
+
         len_regulated, dec_lens = regulate_len(
             dur_tgt, enc_out, pace, mel_max_len)
 
         # Output FFT
         dec_out, dec_mask = self.decoder(len_regulated, dec_lens)
         mel_out = self.proj(dec_out)
-        return (mel_out, dec_mask, dur_pred, log_dur_pred, pitch_pred,
-                pitch_tgt, energy_pred, energy_tgt, attn_soft, attn_hard,
-                attn_hard_dur, attn_logprob)
+        return (mel_out, dec_mask, dur_pred, log_dur_pred,
+                pitch_pred, pitch_tgt, energy_pred, energy_tgt,
+                spectral_tilt_pred, spectral_tilt_tgt,
+                attn_soft, attn_hard, attn_hard_dur, attn_logprob)
 
     def infer(self, inputs, pace=1.0, dur_tgt=None, pitch_tgt=None,
-              energy_tgt=None, pitch_transform=None, max_duration=75,
-              speaker=0):
+              energy_tgt=None, spectral_tilt_tgt=None,
+              pitch_transform=None, max_duration=75, speaker=0):
 
         if self.speaker_emb is None:
             spk_emb = 0
@@ -367,6 +405,19 @@ class FastPitch(nn.Module):
         else:
             energy_pred = None
 
+        # Predict spectral_tilt
+        if self.spectral_tilt_conditioning:
+
+            if spectral_tilt_tgt is None:
+                spectral_tilt_pred = self.spectral_tilt_predictor(enc_out, enc_mask).squeeze(-1)
+                spectral_tilt_emb = self.spectral_tilt_emb(spectral_tilt_pred.permute(0, 2, 1)).transpose(1, 2)
+            else:
+                spectral_tilt_emb = self.spectral_tilt_emb(spectral_tilt_tgt).transpose(1, 2)
+
+            enc_out = enc_out + spectral_tilt_emb
+        else:
+            spectral_tilt_pred = None
+
         len_regulated, dec_lens = regulate_len(
             dur_pred if dur_tgt is None else dur_tgt,
             enc_out, pace, mel_max_len=None)
@@ -375,4 +426,4 @@ class FastPitch(nn.Module):
         mel_out = self.proj(dec_out)
         # mel_lens = dec_mask.squeeze(2).sum(axis=1).long()
         mel_out = mel_out.permute(0, 2, 1)  # For inference.py
-        return mel_out, dec_lens, dur_pred, pitch_pred, energy_pred
+        return mel_out, dec_lens, dur_pred, pitch_pred, energy_pred, spectral_tilt_pred

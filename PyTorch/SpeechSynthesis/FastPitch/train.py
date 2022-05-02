@@ -158,6 +158,9 @@ def parse_args(parser):
                       help='Normalization value for pitch')
     cond.add_argument('--load-mel-from-disk', action='store_true',
                       help='Use mel-spectrograms cache on the disk')  # XXX
+    # for spectral tilt estimation
+    cond.add_argument('--include-tilt', default=None, type=str,
+                      choices=['source', 'surface', 'both', None])
 
     audio = parser.add_argument_group('audio parameters')
     audio.add_argument('--max-wav-value', default=32768.0, type=float,
@@ -367,15 +370,17 @@ def plot_batch_mels(pred_tgt_lists, rank):
 
 def log_validation_batch(x, y_pred, rank):
     x_fields = ['text_padded', 'input_lengths', 'mel_padded',
-                'output_lengths', 'pitch_padded', 'energy_padded',
+                'output_lengths', 'pitch_padded', 'energy_padded', 'spectral_tilt_padded',
                 'speaker', 'attn_prior', 'audiopaths']
     y_pred_fields = ['mel_out', 'dec_mask', 'dur_pred', 'log_dur_pred',
                      'pitch_pred', 'pitch_tgt', 'energy_pred',
-                     'energy_tgt', 'attn_soft', 'attn_hard',
+                     'energy_tgt', 'spectral_tilt_pred',
+                     'spectral_tilt_tgt', 'attn_soft', 'attn_hard',
                      'attn_hard_dur', 'attn_logprob']
-
     validation_dict = dict(zip(x_fields + y_pred_fields,
                                list(x) + list(y_pred)))
+    # dec mask contains booleans, which to be logged need to be converted to integers
+    validation_dict.pop('dec_mask', None)
     log(validation_dict, rank)  # something in here returns a warning
 
     pred_specs_keys = ['mel_out', 'pitch_pred', 'energy_pred', 'attn_hard_dur']
@@ -400,13 +405,19 @@ def validate(model, criterion, valset, batch_size, collate_fn, distributed_run,
         val_meta = defaultdict(float)
         val_num_frames = 0
         for i, batch in enumerate(val_loader):
+            # x = (inputs, input_lens, mel_tgt, mel_lens, pitch_dense,
+            # energy_dense, spectral_tilt_dense, speaker, attn_prior, audiopaths)
             x, y, num_frames = batch_to_gpu(batch)
+            # (mel_out, dec_mask, dur_pred, log_dur_pred,
+            #  pitch_pred, pitch_tgt, energy_pred, energy_tgt,
+            #  spectral_tilt_pred, spectral_tilt_tgt,
+            #  attn_soft, attn_hard, attn_hard_dur, attn_logprob)
             y_pred = model(x)
-
-            if i % 5 == 0:
-                log_validation_batch(x, y_pred, rank)
-
             loss, meta = criterion(y_pred, y, is_training=False, meta_agg='sum')
+            if i % 5 == 0:
+                # dec_mask is index 1
+                # y_pred = y_pred[0:1] + y_pred[2:]
+                log_validation_batch(x, y_pred, rank)
 
             if distributed_run:
                 for k, v in meta.items():
@@ -420,13 +431,13 @@ def validate(model, criterion, valset, batch_size, collate_fn, distributed_run,
         val_meta = {k: v / len(valset) for k, v in val_meta.items()}
 
     val_meta['took'] = time.perf_counter() - tik
-
     # log overall statistics of the validate step
     log({
         'loss/validation-loss': val_meta['loss'].item(),
         'mel-loss/validation-mel-loss': val_meta['mel_loss'].item(),
         'pitch-loss/validation-pitch-loss': val_meta['pitch_loss'].item(),
         'energy-loss/validation-energy-loss': val_meta['energy_loss'].item(),
+        'spectral-loss/validation-spectral-loss':  val_meta['spectral_tilt_loss'].item(),
         'dur-loss/validation-dur-error': val_meta['duration_predictor_loss'].item(),
         'validation-frames per s': num_frames.item() / val_meta['took'],
         'validation-took': val_meta['took'],
@@ -615,6 +626,7 @@ def main():
         epoch_mel_loss = 0.0
         epoch_pitch_loss = 0.0
         epoch_energy_loss = 0.0
+        epoch_spectral_loss = 0.0
         epoch_dur_loss = 0.0
         epoch_num_frames = 0
         epoch_frames_per_sec = 0.0
@@ -631,7 +643,6 @@ def main():
         epoch_iter = 0
         num_iters = len(train_loader) // args.grad_accumulation
         for batch in train_loader:
-
             if accumulated_steps == 0:
                 if epoch_iter == num_iters:
                     break
@@ -640,22 +651,19 @@ def main():
 
                 adjust_learning_rate(total_iter, optimizer, args.learning_rate,
                                      args.warmup_steps)
-
                 model.zero_grad(set_to_none=True)
 
             x, y, num_frames = batch_to_gpu(batch)
-
             with torch.cuda.amp.autocast(enabled=args.amp):
                 y_pred = model(x)
                 loss, meta = criterion(y_pred, y)
-
                 if (args.kl_loss_start_epoch is not None
                         and epoch >= args.kl_loss_start_epoch):
 
                     if args.kl_loss_start_epoch == epoch and epoch_iter == 1:
                         print('Begin hard_attn loss')
 
-                    _, _, _, _, _, _, _, _, attn_soft, attn_hard, _, _ = y_pred
+                    _, _, _, _, _, _, _, _, _, _, attn_soft, attn_hard, _, _ = y_pred
                     binarization_loss = attention_kl_loss(attn_hard, attn_soft)
                     kl_weight = min((epoch - args.kl_loss_start_epoch) / args.kl_loss_warmup_epochs, 1.0) * args.kl_loss_weight
                     meta['kl_loss'] = binarization_loss.clone().detach() * kl_weight
@@ -711,6 +719,7 @@ def main():
                 iter_kl_loss = iter_meta['kl_loss'].item()
                 iter_pitch_loss = iter_meta['pitch_loss'].item()
                 iter_energy_loss = iter_meta['energy_loss'].item()
+                iter_spectral_loss = iter_meta['spectral_tilt_loss'].item()
                 iter_dur_loss = iter_meta['duration_predictor_loss'].item()
                 iter_time = time.perf_counter() - iter_start_time
                 epoch_frames_per_sec += iter_num_frames / iter_time
@@ -719,6 +728,7 @@ def main():
                 epoch_mel_loss += iter_mel_loss
                 epoch_pitch_loss += iter_pitch_loss
                 epoch_energy_loss += iter_energy_loss
+                epoch_spectral_loss += iter_spectral_loss
                 epoch_dur_loss += iter_dur_loss
 
                 if epoch_iter % 5 == 0:
@@ -733,6 +743,7 @@ def main():
                         'kl_weight': kl_weight,
                         'pitch-loss/pitch_loss': iter_pitch_loss,
                         'energy-loss/energy_loss': iter_energy_loss,
+                        'spectral-loss/spectral_loss': iter_spectral_loss,
                         'dur-loss/dur_loss': iter_dur_loss,
                         'frames per s': iter_num_frames / iter_time,
                         'took': iter_time,
@@ -756,20 +767,19 @@ def main():
             'mel-loss/epoch_mel_loss': epoch_mel_loss,
             'pitch-loss/epoch_pitch_loss': epoch_pitch_loss,
             'energy-loss/epoch_energy_loss': epoch_energy_loss,
+            'spectral-loss/epoch_spectral_loss': epoch_spectral_loss,
             'dur-loss/epoch_dur_loss': epoch_dur_loss,
             'epoch_frames per s': epoch_num_frames / epoch_time,
             'epoch_took': epoch_time,
         }, args.local_rank)
         bmark_stats.update(epoch_num_frames, epoch_loss, epoch_mel_loss,
                            epoch_time)
-
         validate(model, criterion, valset, args.batch_size, collate_fn,
                  distributed_run, batch_to_gpu, args.local_rank)
 
         if args.ema_decay > 0:
             validate(ema_model, criterion, valset, args.batch_size, collate_fn,
                      distributed_run, batch_to_gpu, args.local_rank)
-
         maybe_save_checkpoint(args, model, ema_model, optimizer, scaler, epoch,
                               total_iter, model_config)
 
