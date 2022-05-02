@@ -373,6 +373,7 @@ def log_validation_batch(x, y_pred, rank):
                      'pitch_pred', 'pitch_tgt', 'energy_pred',
                      'energy_tgt', 'attn_soft', 'attn_hard',
                      'attn_hard_dur', 'attn_logprob']
+
     validation_dict = dict(zip(x_fields + y_pred_fields,
                                list(x) + list(y_pred)))
     # dec mask contains booleans, which to be logged need to be converted to integers
@@ -409,10 +410,9 @@ def validate(model, criterion, valset, batch_size, collate_fn, distributed_run,
             #  spectral_tilt_pred, spectral_tilt_tgt,
             #  attn_soft, attn_hard, attn_hard_dur, attn_logprob)
             y_pred = model(x)
+
             loss, meta = criterion(y_pred, y, is_training=False, meta_agg='sum')
             if i % 5 == 0:
-                # dec_mask is index 1
-                # y_pred = y_pred[0:1] + y_pred[2:]
                 log_validation_batch(x, y_pred, rank)
 
             if distributed_run:
@@ -427,6 +427,7 @@ def validate(model, criterion, valset, batch_size, collate_fn, distributed_run,
         val_meta = {k: v / len(valset) for k, v in val_meta.items()}
 
     val_meta['took'] = time.perf_counter() - tik
+
     # log overall statistics of the validate step
     log({
         'loss/validation-loss': val_meta['loss'].item(),
@@ -768,16 +769,14 @@ def main():
         }, args.local_rank)
         bmark_stats.update(epoch_num_frames, epoch_loss, epoch_mel_loss,
                            epoch_time)
-<<<<<<< HEAD
 
-=======
->>>>>>> 94711769... Remove prints
         validate(model, criterion, valset, args.batch_size, collate_fn,
                  distributed_run, batch_to_gpu, args.local_rank)
 
         if args.ema_decay > 0:
             validate(ema_model, criterion, valset, args.batch_size, collate_fn,
                      distributed_run, batch_to_gpu, args.local_rank)
+
         maybe_save_checkpoint(args, model, ema_model, optimizer, scaler, epoch,
                               total_iter, model_config)
 
