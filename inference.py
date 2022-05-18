@@ -42,7 +42,6 @@ from torch.nn.utils.rnn import pad_sequence
 import dllogger as DLLogger
 from dllogger import StdOutBackend, JSONStreamBackend, Verbosity
 
-from common import utils
 from common.tb_dllogger import (init_inference_metadata, stdout_metric_format,
                                 unique_log_fpath)
 from common.text import cmudict
@@ -59,7 +58,7 @@ def parse_args(parser):
     Parse commandline arguments.
     """
     parser.add_argument('-i', '--input', type=str, required=True,
-                        help='Full path to the input text (phareses separated by newlines)')
+                        help='Full path to the input text (phrases separated by newlines)')
     parser.add_argument('-o', '--output', default=None,
                         help='Output folder to save audio (file per phrase)')
     parser.add_argument('--log-file', type=str, default=None,

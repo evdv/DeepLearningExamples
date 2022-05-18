@@ -15,7 +15,7 @@ cd /disk/scratch/UUN
 3. Clone repo
 
 ```bash
-git clone https://github.com/NVIDIA/DeepLearningExamples.git
+git clone https://github.com/evdv/FastPitches.git
 ```
 
 Alternative with SSH:
@@ -74,7 +74,7 @@ conda install pytorch torchvision cudatoolkit=10.2 -c pytorch
 
 9. Install Apex
 ```bash
-cd FastPitches/PyTorch/SpeechSynthesis/FastPitch/
+cd FastPitches/
 git clone https://github.com/NVIDIA/apex
 pip install -v --disable-pip-version-check --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" ./
 ```
@@ -99,7 +99,7 @@ bash scripts/prepare_dataset.sh
 ```bash
 export CUDA_VISIBLE_DEVICES=1
 mkdir output
-python inference.py --cuda   --fastpitch pretrained_models/fastpitch/nvidia_fastpitch_210824.pt   --waveglow pretrained_models/waveglow/nvidia_waveglow256pyt_fp16.pt   --wn-channels 256   -i phrases/devset10.tsv   -o output/wavs_devset10
+python inference.py --cuda --fastpitch pretrained_models/fastpitch/nvidia_fastpitch_210824.pt --waveglow pretrained_models/waveglow/nvidia_waveglow256pyt_fp16.pt --wn-channels 256 -i phrases/devset10.tsv -o output/wavs_devset10
 ```
 
 13. Weights and Biases login
