@@ -96,7 +96,8 @@ def parse_args(parser):
                         help='Path to dataset (for loading extra data fields)')
     parser.add_argument('--speaker', type=int, default=0,
                         help='Speaker ID for a multi-speaker model')
-
+    parser.add_argument('--condition', type=int, default=0,
+                        help='Condition ID for a dicrete condition model')
     parser.add_argument('--p-arpabet', type=float, default=0.0, help='')
     parser.add_argument('--heteronyms-path', type=str, default='cmudict/heteronyms',
                         help='')
@@ -128,7 +129,8 @@ def parse_args(parser):
     cond = parser.add_argument_group('conditioning on additional attributes')
     cond.add_argument('--n-speakers', type=int, default=1,
                       help='Number of speakers in the model.')
-
+    cond.add_argument('--n-conditions', type=int, default=1,
+                      help='Number of discrete conditions in the model.')
     return parser
 
 
@@ -358,6 +360,7 @@ def main():
 
     gen_kw = {'pace': args.pace,
               'speaker': args.speaker,
+              'condition': args.condition, #@Johannah have to add condition here
               'pitch_tgt': None,
               'pitch_transform': build_pitch_transformation(args)}
 

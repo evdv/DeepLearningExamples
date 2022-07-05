@@ -126,7 +126,7 @@ class FastPitch(nn.Module):
                  energy_predictor_kernel_size, energy_predictor_filter_size,
                  p_energy_predictor_dropout, energy_predictor_n_layers,
                  energy_embedding_kernel_size,
-                 n_speakers, speaker_emb_weight, pitch_conditioning_formants=1):
+                 n_speakers, speaker_emb_weight, n_conditions, condition_emb_weight, pitch_conditioning_formants=1):
         super(FastPitch, self).__init__()
 
         self.encoder = FFTransformer(
@@ -148,6 +148,14 @@ class FastPitch(nn.Module):
         else:
             self.speaker_emb = None
         self.speaker_emb_weight = speaker_emb_weight
+
+        #Have to figure out what symbols_embedding_dim is
+        if n_conditions > 1:
+            self.condition_emb = nn.Embedding(n_conditions, symbols_embedding_dim)
+        else:
+            self.condition_emb = None
+        self.condition_emb_weight = condition_emb_weight
+
 
         self.duration_predictor = TemporalPredictor(
             in_fft_output_size,
@@ -242,7 +250,7 @@ class FastPitch(nn.Module):
     def forward(self, inputs, use_gt_pitch=True, pace=1.0, max_duration=75):
 
         (inputs, input_lens, mel_tgt, mel_lens, pitch_dense, energy_dense,
-         speaker, attn_prior, audiopaths) = inputs
+         speaker, attn_prior, audiopaths, condition) = inputs
 
         mel_max_len = mel_tgt.size(2)
 
@@ -253,8 +261,15 @@ class FastPitch(nn.Module):
             spk_emb = self.speaker_emb(speaker).unsqueeze(1)
             spk_emb.mul_(self.speaker_emb_weight)
 
+        # Calculate discrete condition embedding
+        if self.condition_emb is None:
+            cond_emb = 0
+        else:
+            cond_emb = self.condition_emb(condition).unsqueeze(1)
+            cond_emb.mul_(self.condition_emb_weight)
+
         # Input FFT
-        enc_out, enc_mask = self.encoder(inputs, conditioning=spk_emb)
+        enc_out, enc_mask = self.encoder(inputs, conditioning=spk_emb, conditioning_2=cond_emb) #need to add condition conditioning here
 
         # Alignment
         text_emb = self.encoder.word_emb(inputs)
@@ -281,7 +296,7 @@ class FastPitch(nn.Module):
         dur_pred = torch.clamp(torch.exp(log_dur_pred) - 1, 0, max_duration)
 
         # Predict pitch
-        pitch_pred = self.pitch_predictor(enc_out, enc_mask).permute(0, 2, 1)
+        pitch_pred = self.pitch_predictor(enc_out, enc_mask).permute(0, 2, 1) #maybe we want to condition pitch prediction on the conditioning parameter.
 
         # Average pitch over characters
         pitch_tgt = average_pitch(pitch_dense, dur_tgt)
@@ -290,7 +305,7 @@ class FastPitch(nn.Module):
             pitch_emb = self.pitch_emb(pitch_tgt)
         else:
             pitch_emb = self.pitch_emb(pitch_pred)
-        enc_out = enc_out + pitch_emb.transpose(1, 2)
+        enc_out = enc_out + pitch_emb.transpose(1, 2) #Adding with encoder output
 
         # Predict energy
         if self.energy_conditioning:
@@ -302,13 +317,13 @@ class FastPitch(nn.Module):
 
             energy_emb = self.energy_emb(energy_tgt)
             energy_tgt = energy_tgt.squeeze(1)
-            enc_out = enc_out + energy_emb.transpose(1, 2)
+            enc_out = enc_out + energy_emb.transpose(1, 2) #adding to encoder output
         else:
             energy_pred = None
             energy_tgt = None
 
         len_regulated, dec_lens = regulate_len(
-            dur_tgt, enc_out, pace, mel_max_len)
+            dur_tgt, enc_out, pace, mel_max_len) #upsampling
 
         # Output FFT
         dec_out, dec_mask = self.decoder(len_regulated, dec_lens)
@@ -319,7 +334,7 @@ class FastPitch(nn.Module):
 
     def infer(self, inputs, pace=1.0, dur_tgt=None, pitch_tgt=None,
               energy_tgt=None, pitch_transform=None, max_duration=75,
-              speaker=0):
+              speaker=0, condition=0):
 
         if self.speaker_emb is None:
             spk_emb = 0
@@ -329,8 +344,16 @@ class FastPitch(nn.Module):
             spk_emb = self.speaker_emb(speaker).unsqueeze(1)
             spk_emb.mul_(self.speaker_emb_weight)
 
+        if self.condition_emb is None:
+            cond_emb = 0
+        else:
+            condition = (torch.ones(inputs.size(0)).long().to(inputs.device)
+                       * condition)
+            cond_emb = self.condition_emb(condition).unsqueeze(1)
+            cond_emb.mul_(self.condition_emb_weight)
+
         # Input FFT
-        enc_out, enc_mask = self.encoder(inputs, conditioning=spk_emb)
+        enc_out, enc_mask = self.encoder(inputs, conditioning=spk_emb, conditioning_2=cond_emb) #need to add conditioning here but will it take list?
 
         # Predict durations
         log_dur_pred = self.duration_predictor(enc_out, enc_mask).squeeze(-1)

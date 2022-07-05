@@ -126,5 +126,7 @@ def parse_fastpitch_args(parent, add_help=False):
                       help='Pitch embedding conv-1D kernel size')
     cond.add_argument('--speaker-emb-weight', type=float, default=1.0,
                       help='Scale speaker embedding')
+    cond.add_argument('--condition-emb-weight', type=float, default=1.0,
+                      help='Scale condition embedding')
 
     return parser

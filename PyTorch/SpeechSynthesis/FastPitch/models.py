@@ -136,6 +136,9 @@ def get_model_config(model_name, args):
             # speakers parameters
             n_speakers=args.n_speakers,
             speaker_emb_weight=args.speaker_emb_weight,
+            # dicrete condition parameter
+            n_conditions=args.n_conditions,
+            condition_emb_weight=args.condition_emb_weight,
             # energy predictor
             energy_predictor_kernel_size=args.energy_predictor_kernel_size,
             energy_predictor_filter_size=args.energy_predictor_filter_size,

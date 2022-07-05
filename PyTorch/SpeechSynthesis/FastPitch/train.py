@@ -145,6 +145,9 @@ def parse_args(parser):
     cond.add_argument('--n-speakers', type=int, default=1,
                       help='Number of speakers in the dataset. '
                            'n_speakers > 1 enables speaker embeddings')
+    cond.add_argument('--n-conditions', type=int, default=1,
+                      help='Number of discrete conditions in the dataset. '
+                           'n_conditions > 1 enables discrete conditioning embeddings')
     cond.add_argument('--load-pitch-from-disk', action='store_true',
                       help='Use pitch cached on disk with prepare_dataset.py')
     cond.add_argument('--pitch-online-method', default='pyin',
@@ -592,7 +595,7 @@ def main():
     if args.local_rank == 0:
         prepare_tmp(args.pitch_online_dir)
 
-    trainset = TTSDataset(audiopaths_and_text=args.training_files, **vars(args))
+    trainset = TTSDataset(audiopaths_and_text=args.training_files, **vars(args)) #making changes here ./fastpitch/data_function.py
     valset = TTSDataset(audiopaths_and_text=args.validation_files, **vars(args))
 
     if distributed_run:

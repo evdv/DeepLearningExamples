@@ -55,6 +55,7 @@ def parse_args(parser):
     parser.add_argument('--log-file', type=str, default='preproc_log.json',
                          help='Filename for logging')
     parser.add_argument('--n-speakers', type=int, default=1)
+    parser.add_argument('--n-conditions', type=int, default=1)
     # Mel extraction
     parser.add_argument('--max-wav-value', default=32768.0, type=float,
                         help='Maximum audiowave value')
@@ -113,6 +114,7 @@ def main():
             n_mel_channels=args.n_mel_channels,
             p_arpabet=0.0,
             n_speakers=args.n_speakers,
+            n_conditions=args.n_conditions
             load_mel_from_disk=False,
             load_pitch_from_disk=False,
             pitch_mean=None,
