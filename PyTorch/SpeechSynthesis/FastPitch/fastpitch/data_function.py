@@ -216,10 +216,18 @@ class TTSDataset(torch.utils.data.Dataset):
         if self.n_speakers > 1:
             speaker = int(self.audiopaths_and_text[index]['speaker'])
         if self.n_conditions > 1:
+            cond = self.audiopaths_and_text[index]['condition']
+            if cond is None or cond == 'None':
+                print(audiopath, text, self.audiopaths_and_text[index])
             condition = int(self.audiopaths_and_text[index]['condition'])
 
         mel = self.get_mel(audiopath)
+        if mel.size(1) > 700:
+            print('MEL LEN: ', mel.size(), audiopath)
         text = self.get_text(text)
+        length = len(text)
+        if length >= 130:
+            print('LENGTH: ', len(text), audiopath)
         pitch = self.get_pitch(index, mel.size(-1))
         energy = torch.norm(mel.float(), dim=0, p=2)
         attn_prior = self.get_prior(index, mel.shape[1], text.shape[0])
@@ -425,3 +433,4 @@ def batch_to_gpu(batch):
     y = [mel_padded, input_lengths, output_lengths]
     len_x = torch.sum(output_lengths)
     return (x, y, len_x)
+

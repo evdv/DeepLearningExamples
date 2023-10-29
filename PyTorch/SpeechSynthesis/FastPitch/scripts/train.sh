@@ -1,23 +1,28 @@
 #!/usr/bin/env bash
-
+USER=`whoami`
 export OMP_NUM_THREADS=1
-export CUDA_VISIBLE_DEVICES=0
+export MPLCONFIGDIR=/disk/scratch1/${USER}/tmp/
+export WANDB_CONFIG_DIR=/disk/scratch1/${USER}/tmp/.config/wandb
+export OMP_NUM_THREADS=1
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 
-: ${NUM_GPUS:=1}
-: ${BATCH_SIZE:=16}
+: ${NUM_GPUS:=2}
+: ${BATCH_SIZE:=4}
 : ${GRAD_ACCUMULATION:=2}
-: ${OUTPUT_DIR:="./output"}
+: ${PROJECT:="conditioning"}
+: ${EXPERIMENT_DESC:="LJ random categories"}
+: ${OUTPUT_DIR:="./output_categories"}
 : ${DATASET_PATH:=None}
-: ${TRAIN_FILELIST:=filelists/ljs_audio_pitch_text_train_v3.txt}
-: ${VAL_FILELIST:=filelists/ljs_audio_pitch_text_val.txt}
+: ${TRAIN_FILELIST:=filelists/ljs_audio_pitch_text_train_v3_randcond.txt}
+: ${VAL_FILELIST:=filelists/ljs_audio_pitch_text_val_randcond.txt}
 : ${AMP:=false}
 : ${SEED:=""}
 
 : ${LEARNING_RATE:=0.1}
 
 # Adjust these when the amount of data changes
-: ${EPOCHS:=10}
-: ${EPOCHS_PER_CHECKPOINT:=1}
+: ${EPOCHS:=1500}
+: ${EPOCHS_PER_CHECKPOINT:=100}
 : ${WARMUP_STEPS:=1000}
 : ${KL_LOSS_WARMUP:=100}
 
@@ -30,14 +35,14 @@ export CUDA_VISIBLE_DEVICES=0
 : ${APPEND_SPACES:=false}
 
 : ${LOAD_PITCH_FROM_DISK:=true}
-: ${LOAD_MEL_FROM_DISK:=true}
+: ${LOAD_MEL_FROM_DISK:=false}
 
 # For multispeaker models, add speaker ID = {0, 1, ...} as the last filelist column
 : ${NSPEAKERS:=1}
 : ${SAMPLING_RATE:=22050}
 
 # For adding a new discrete conditioner.
-: ${NCONDITIONS:=1}
+: ${NCONDITIONS:=7}
 
 
 # Adjust env variables to maintain the global batch size: NUM_GPUS x BATCH_SIZE x GRAD_ACCUMULATION = 256.

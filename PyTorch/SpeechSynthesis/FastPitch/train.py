@@ -341,6 +341,7 @@ def plot_batch_mels(pred_tgt_lists, rank):
     # target: mel, pitch, energy
     for mel_pitch_energy in pred_tgt_lists:
         mels = mel_pitch_energy[0]
+        print(mels.size())
         if mels.size(dim=2) == 80:  # tgt and pred mel have diff dimension order
             mels = mels.permute(0, 2, 1)
         mel_lens = mel_pitch_energy[-1]
@@ -371,7 +372,7 @@ def plot_batch_mels(pred_tgt_lists, rank):
 def log_validation_batch(x, y_pred, rank):
     x_fields = ['text_padded', 'input_lengths', 'mel_padded',
                 'output_lengths', 'pitch_padded', 'energy_padded',
-                'speaker', 'attn_prior', 'audiopaths']
+                'speaker', 'attn_prior', 'audiopaths', 'condition']
     y_pred_fields = ['mel_out', 'dec_mask', 'dur_pred', 'log_dur_pred',
                      'pitch_pred', 'pitch_tgt', 'energy_pred',
                      'energy_tgt', 'attn_soft', 'attn_hard',
@@ -380,7 +381,7 @@ def log_validation_batch(x, y_pred, rank):
     validation_dict = dict(zip(x_fields + y_pred_fields,
                                list(x) + list(y_pred)))
     log(validation_dict, rank)  # something in here returns a warning
-
+    print('just before plotting mel sizes:', validation_dict['mel_out'].size(), validation_dict['mel_padded'].size())
     pred_specs_keys = ['mel_out', 'pitch_pred', 'energy_pred', 'attn_hard_dur']
     tgt_specs_keys = ['mel_padded', 'pitch_tgt', 'energy_tgt', 'attn_hard_dur']
     plot_batch_mels([[validation_dict[key] for key in pred_specs_keys],
@@ -405,7 +406,7 @@ def validate(model, criterion, valset, batch_size, collate_fn, distributed_run,
         for i, batch in enumerate(val_loader):
             x, y, num_frames = batch_to_gpu(batch)
             y_pred = model(x)
-
+            print('val batch info: ', x[-2], x[2].size(), y[0].size(), y_pred[0].size())
             if i % 5 == 0:
                 log_validation_batch(x, y_pred, rank)
 
@@ -634,7 +635,8 @@ def main():
         epoch_iter = 0
         num_iters = len(train_loader) // args.grad_accumulation
         for batch in train_loader:
-
+            if batch[2].size(1) > 700:
+                continue
             if accumulated_steps == 0:
                 if epoch_iter == num_iters:
                     break
